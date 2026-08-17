@@ -5,6 +5,7 @@ import { HapticTab } from "@/components/haptic-tab";
 import { IconSymbol } from "@/components/ui/icon-symbol";
 import { Platform } from "react-native";
 import { useColors } from "@/hooks/use-colors";
+import { HubProvider } from "@/lib/agent-hub";
 
 export default function TabLayout() {
   const colors = useColors();
@@ -13,6 +14,7 @@ export default function TabLayout() {
   const tabBarHeight = 56 + bottomPadding;
 
   return (
+    <HubProvider>
     <Tabs
       screenOptions={{
         tabBarActiveTintColor: colors.tint,
@@ -31,10 +33,39 @@ export default function TabLayout() {
       <Tabs.Screen
         name="index"
         options={{
-          title: "Home",
+          title: "الرئيسية",
           tabBarIcon: ({ color }) => <IconSymbol size={28} name="house.fill" color={color} />,
         }}
       />
+      <Tabs.Screen
+        name="projects"
+        options={{
+          title: "المشاريع",
+          tabBarIcon: ({ color }) => <IconSymbol size={25} name="folder.fill" color={color} />,
+        }}
+      />
+      <Tabs.Screen
+        name="agents"
+        options={{
+          title: "الوكلاء",
+          tabBarIcon: ({ color }) => <IconSymbol size={25} name="person.3.fill" color={color} />,
+        }}
+      />
+      <Tabs.Screen
+        name="tasks"
+        options={{
+          title: "المهام",
+          tabBarIcon: ({ color }) => <IconSymbol size={25} name="checklist" color={color} />,
+        }}
+      />
+      <Tabs.Screen
+        name="chat"
+        options={{
+          title: "المحادثة",
+          tabBarIcon: ({ color }) => <IconSymbol size={25} name="bubble.left.and.bubble.right.fill" color={color} />,
+        }}
+      />
     </Tabs>
+    </HubProvider>
   );
 }

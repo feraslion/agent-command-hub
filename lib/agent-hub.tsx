@@ -323,6 +323,7 @@ type HubContextValue = {
   costEntries: CostEntry[];
   approvals: ApprovalRequest[];
   budgetLimit: number;
+  setBudgetLimit: (value: number) => boolean;
   alerts: HubAlert[];
   unreadAlertCount: number;
   nativeNotificationsEnabled: boolean;
@@ -346,7 +347,7 @@ export function HubProvider({ children }: PropsWithChildren) {
   const [events, setEvents] = useState(initialEvents);
   const [messages, setMessages] = useState(initialMessages);
   const [approvals, setApprovals] = useState(initialApprovals);
-  const [budgetLimit] = useState(2.5);
+  const [budgetLimit, setBudgetLimitState] = useState(2.5);
   const [readAlertIds, setReadAlertIds] = useState<string[]>([]);
   const [notificationPreferences, setNotificationPreferences] = useState(defaultNotificationPreferences);
   const nativeNotificationsEnabled = notificationPreferences.device;
@@ -396,6 +397,11 @@ export function HubProvider({ children }: PropsWithChildren) {
 
   const approveRequest = (requestId: string) => resolveRequest(requestId, "معتمد");
   const rejectRequest = (requestId: string) => resolveRequest(requestId, "مرفوض");
+  const setBudgetLimit = (value: number) => {
+    if (!isValidBudgetLimit(value)) return false;
+    setBudgetLimitState(Math.round(value * 100) / 100);
+    return true;
+  };
 
   const alerts = useMemo(() => buildHubAlerts(approvals, initialCostEntries, budgetLimit, readAlertIds, notificationPreferences), [approvals, budgetLimit, readAlertIds, notificationPreferences]);
   const unreadAlertCount = alerts.filter((alert) => !alert.read).length;
@@ -403,7 +409,7 @@ export function HubProvider({ children }: PropsWithChildren) {
   const markAllAlertsRead = () => setReadAlertIds(alerts.map((alert) => alert.id));
   const setNotificationPreference = (key: keyof NotificationPreferences, enabled: boolean) => setNotificationPreferences((current) => ({ ...current, [key]: enabled }));
 
-  const value = useMemo(() => ({ projects, agents: initialAgents, tasks, events, decisions: initialDecisions, messages, costEntries: initialCostEntries, approvals, budgetLimit, alerts, unreadAlertCount, nativeNotificationsEnabled, notificationPreferences, activeProject, addProject, requestVerification, sendMessage, approveRequest, rejectRequest, markAlertRead, markAllAlertsRead, setNotificationPreference }), [projects, tasks, events, messages, approvals, budgetLimit, alerts, unreadAlertCount, nativeNotificationsEnabled, notificationPreferences, activeProject]);
+  const value = useMemo(() => ({ projects, agents: initialAgents, tasks, events, decisions: initialDecisions, messages, costEntries: initialCostEntries, approvals, budgetLimit, setBudgetLimit, alerts, unreadAlertCount, nativeNotificationsEnabled, notificationPreferences, activeProject, addProject, requestVerification, sendMessage, approveRequest, rejectRequest, markAlertRead, markAllAlertsRead, setNotificationPreference }), [projects, tasks, events, messages, approvals, budgetLimit, alerts, unreadAlertCount, nativeNotificationsEnabled, notificationPreferences, activeProject]);
   return <HubContext.Provider value={value}>{children}</HubContext.Provider>;
 }
 
@@ -432,6 +438,10 @@ export function getBudgetSummary(entries: CostEntry[], budgetLimit: number) {
   const remaining = Math.max(0, budgetLimit - spent);
   const percent = budgetLimit > 0 ? Math.min(100, Math.round((spent / budgetLimit) * 100)) : 0;
   return { spent, remaining, percent };
+}
+
+export function isValidBudgetLimit(value: number) {
+  return Number.isFinite(value) && value >= 0.5 && value <= 10000;
 }
 
 export function alertTone(severity: AlertSeverity) {

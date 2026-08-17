@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { alertTone, approvalTone, buildHubAlerts, getBudgetSummary, statusTone, type AgentStatus, type ProjectStatus, type TaskStatus } from "../lib/agent-hub";
+import { alertTone, approvalTone, buildHubAlerts, getBudgetSummary, isValidBudgetLimit, statusTone, type AgentStatus, type ProjectStatus, type TaskStatus } from "../lib/agent-hub";
 
 describe("statusTone", () => {
   it("يعطي لون النجاح للحالات المكتملة والنشطة", () => {
@@ -80,5 +80,21 @@ describe("buildHubAlerts", () => {
 
     expect(alerts).toHaveLength(1);
     expect(alerts[0].severity).toBe("budget");
+  });
+});
+
+describe("budget limit validation", () => {
+  it("يقبل سقفاً مالياً ضمن المجال المسموح ويرفض القيم غير الصالحة", () => {
+    expect(isValidBudgetLimit(0.5)).toBe(true);
+    expect(isValidBudgetLimit(10000)).toBe(true);
+    expect(isValidBudgetLimit(0.49)).toBe(false);
+    expect(isValidBudgetLimit(10000.01)).toBe(false);
+    expect(isValidBudgetLimit(Number.NaN)).toBe(false);
+  });
+
+  it("يغيّر ظهور تحذير الميزانية عند تغيير سقف المشروع", () => {
+    const entries = [{ id: "c1", projectId: "p", taskId: "t", agent: "A", task: "T", model: "M", tokens: 10, duration: "1د", cost: 1.9 }];
+    expect(buildHubAlerts([], entries, 3)).toHaveLength(0);
+    expect(buildHubAlerts([], entries, 2.5)).toHaveLength(1);
   });
 });

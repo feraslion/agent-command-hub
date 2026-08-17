@@ -9,7 +9,10 @@ export type EventType =
   | "ARTIFACT_CREATED"
   | "TEST_REQUESTED"
   | "REVIEW_REQUESTED"
-  | "REVIEW_APPROVED";
+  | "REVIEW_APPROVED"
+  | "APPROVAL_REQUESTED"
+  | "APPROVAL_APPROVED"
+  | "APPROVAL_REJECTED";
 
 export type Project = {
   id: string;
@@ -71,6 +74,34 @@ export type ChatMessage = {
   sender: "أنت" | "النظام";
   text: string;
   time: string;
+};
+
+export type CostEntry = {
+  id: string;
+  projectId: string;
+  taskId: string;
+  agent: string;
+  task: string;
+  model: string;
+  tokens: number;
+  duration: string;
+  cost: number;
+};
+
+export type ApprovalLevel = "AUTO" | "REVIEW" | "APPROVAL";
+export type ApprovalStatus = "تلقائي" | "قيد الانتظار" | "معتمد" | "مرفوض";
+
+export type ApprovalRequest = {
+  id: string;
+  projectId: string;
+  taskId?: string;
+  title: string;
+  detail: string;
+  requestedBy: string;
+  level: ApprovalLevel;
+  impact: string;
+  status: ApprovalStatus;
+  createdAt: string;
 };
 
 const activeProjectId = "ad1";
@@ -245,6 +276,20 @@ const initialMessages: ChatMessage[] = [
   { id: "m2", sender: "أنت", text: "أعطِ أولوية لمسارات المبيعات والتقارير في أول تسليم.", time: "10:29" },
 ];
 
+const initialCostEntries: CostEntry[] = [
+  { id: "c1", projectId: activeProjectId, taskId: "t1", agent: "Requirements Agent", task: "تحويل الهدف إلى مواصفات", model: "Fast Model", tokens: 18400, duration: "2د 14ث", cost: 0.18 },
+  { id: "c2", projectId: activeProjectId, taskId: "t2", agent: "Architect Agent", task: "إقرار معمارية النظام", model: "Reasoning Model", tokens: 36900, duration: "5د 42ث", cost: 0.72 },
+  { id: "c3", projectId: activeProjectId, taskId: "t3", agent: "Frontend Builder", task: "إنشاء تدفق الواجهة الأساسية", model: "Coding Model", tokens: 42400, duration: "7د 08ث", cost: 0.61 },
+  { id: "c4", projectId: activeProjectId, taskId: "t4", agent: "Backend Builder", task: "تنفيذ عقود واجهة الخدمة", model: "Coding Model", tokens: 23800, duration: "4د 36ث", cost: 0.36 },
+];
+
+const initialApprovals: ApprovalRequest[] = [
+  { id: "a1", projectId: activeProjectId, taskId: "t5", title: "إتاحة اختبار التكامل", detail: "سيبدأ QA اختبار مسارات الخدمة والواجهة بعد اكتمال العقد الخلفي.", requestedBy: "Orchestrator Agent", level: "REVIEW", impact: "متوسط — يفتح دورة اختبار جديدة", status: "قيد الانتظار", createdAt: "منذ دقيقة" },
+  { id: "a2", projectId: activeProjectId, title: "توسيع ميزانية الاستدلال", detail: "رفع الحد التشغيلي المتوقع من $2.50 إلى $3.00 لاستكمال اختبار الحالات الطرفية.", requestedBy: "Planner Agent", level: "APPROVAL", impact: "مرتفع — يغيّر حد التكلفة", status: "قيد الانتظار", createdAt: "منذ 7 دقائق" },
+  { id: "a3", projectId: activeProjectId, taskId: "t4", title: "تسجيل مخرج عقد الخدمة", detail: "تم حفظ مخرج API-SPEC.md ضمن ذاكرة المشروع.", requestedBy: "Backend Builder", level: "AUTO", impact: "منخفض — ملف داخلي", status: "تلقائي", createdAt: "منذ 12 دقيقة" },
+  { id: "a4", projectId: activeProjectId, taskId: "t2", title: "اعتماد قرار المعمارية", detail: "تمت مراجعة قرار فصل عقود API عن واجهة الجوال.", requestedBy: "Reviewer Agent", level: "REVIEW", impact: "متوسط — قرار معماري", status: "معتمد", createdAt: "منذ 26 دقيقة" },
+];
+
 type HubContextValue = {
   projects: Project[];
   agents: Agent[];
@@ -252,10 +297,15 @@ type HubContextValue = {
   events: ExecutionEvent[];
   decisions: Decision[];
   messages: ChatMessage[];
+  costEntries: CostEntry[];
+  approvals: ApprovalRequest[];
+  budgetLimit: number;
   activeProject: Project;
   addProject: () => void;
   requestVerification: (taskId: string) => void;
   sendMessage: (text: string) => void;
+  approveRequest: (requestId: string) => void;
+  rejectRequest: (requestId: string) => void;
 };
 
 const HubContext = createContext<HubContextValue | null>(null);
@@ -265,6 +315,8 @@ export function HubProvider({ children }: PropsWithChildren) {
   const [tasks, setTasks] = useState(initialTasks);
   const [events, setEvents] = useState(initialEvents);
   const [messages, setMessages] = useState(initialMessages);
+  const [approvals, setApprovals] = useState(initialApprovals);
+  const [budgetLimit] = useState(2.5);
   const activeProject = projects.find((project) => project.id === activeProjectId) ?? projects[0];
 
   const addProject = () => {
@@ -296,7 +348,23 @@ export function HubProvider({ children }: PropsWithChildren) {
     setMessages((current) => [...current, { id: `message-${Date.now()}`, sender: "أنت", text: normalized, time: "الآن" }]);
   };
 
-  const value = useMemo(() => ({ projects, agents: initialAgents, tasks, events, decisions: initialDecisions, messages, activeProject, addProject, requestVerification, sendMessage }), [projects, tasks, events, messages, activeProject]);
+  const resolveRequest = (requestId: string, outcome: "معتمد" | "مرفوض") => {
+    const request = approvals.find((item) => item.id === requestId);
+    if (!request || request.status !== "قيد الانتظار") return;
+    setApprovals((current) => current.map((item) => item.id === requestId ? { ...item, status: outcome } : item));
+    if (outcome === "معتمد" && request.taskId === "t5") {
+      setTasks((current) => current.map((item) => item.id === "t5" ? { ...item, status: "قيد التنفيذ" } : item));
+      setProjects((current) => current.map((project) => project.id === request.projectId ? { ...project, currentStage: "الجودة", currentAgent: "QA Agent", updatedAt: "الآن" } : project));
+    }
+    const eventType = outcome === "معتمد" ? "APPROVAL_APPROVED" : "APPROVAL_REJECTED";
+    const label = outcome === "معتمد" ? "اعتماد طلب" : "رفض طلب";
+    setEvents((current) => [{ id: `approval-event-${Date.now()}`, projectId: request.projectId, taskId: request.taskId, type: eventType, label, actor: "مالك المشروع", time: "الآن", detail: `${label}: ${request.title}` }, ...current]);
+  };
+
+  const approveRequest = (requestId: string) => resolveRequest(requestId, "معتمد");
+  const rejectRequest = (requestId: string) => resolveRequest(requestId, "مرفوض");
+
+  const value = useMemo(() => ({ projects, agents: initialAgents, tasks, events, decisions: initialDecisions, messages, costEntries: initialCostEntries, approvals, budgetLimit, activeProject, addProject, requestVerification, sendMessage, approveRequest, rejectRequest }), [projects, tasks, events, messages, approvals, budgetLimit, activeProject]);
   return <HubContext.Provider value={value}>{children}</HubContext.Provider>;
 }
 
@@ -312,4 +380,17 @@ export function statusTone(status: ProjectStatus | AgentStatus | TaskStatus) {
   if (status === "مراجعة" || status === "قيد المراجعة") return "warning" as const;
   if (status === "محجوب") return "error" as const;
   return "muted" as const;
+}
+
+export function approvalTone(status: ApprovalStatus) {
+  if (status === "معتمد" || status === "تلقائي") return "success" as const;
+  if (status === "قيد الانتظار") return "warning" as const;
+  return "error" as const;
+}
+
+export function getBudgetSummary(entries: CostEntry[], budgetLimit: number) {
+  const spent = entries.reduce((total, entry) => total + entry.cost, 0);
+  const remaining = Math.max(0, budgetLimit - spent);
+  const percent = budgetLimit > 0 ? Math.min(100, Math.round((spent / budgetLimit) * 100)) : 0;
+  return { spent, remaining, percent };
 }

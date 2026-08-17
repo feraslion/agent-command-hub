@@ -22,6 +22,7 @@ const MAPPING = {
   "person.3.fill": "groups",
   "checklist": "checklist",
   "bubble.left.and.bubble.right.fill": "forum",
+  "slider.horizontal.3": "tune",
 } as IconMapping;
 
 /**

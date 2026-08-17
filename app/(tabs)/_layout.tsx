@@ -40,8 +40,7 @@ export default function TabLayout() {
       <Tabs.Screen
         name="projects"
         options={{
-          title: "المشاريع",
-          tabBarIcon: ({ color }) => <IconSymbol size={25} name="folder.fill" color={color} />,
+          href: null,
         }}
       />
       <Tabs.Screen
@@ -56,6 +55,13 @@ export default function TabLayout() {
         options={{
           title: "المهام",
           tabBarIcon: ({ color }) => <IconSymbol size={25} name="checklist" color={color} />,
+        }}
+      />
+      <Tabs.Screen
+        name="control"
+        options={{
+          title: "التحكم",
+          tabBarIcon: ({ color }) => <IconSymbol size={25} name="slider.horizontal.3" color={color} />,
         }}
       />
       <Tabs.Screen

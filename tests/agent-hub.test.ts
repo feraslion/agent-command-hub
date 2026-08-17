@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { alertTone, approvalTone, buildHubAlerts, getBudgetSummary, isValidBudgetLimit, statusTone, type AgentStatus, type ProjectStatus, type TaskStatus } from "../lib/agent-hub";
+import { alertTone, approvalTone, budgetChangeDirection, buildHubAlerts, getBudgetSummary, isValidBudgetLimit, statusTone, type AgentStatus, type ProjectStatus, type TaskStatus } from "../lib/agent-hub";
 
 describe("statusTone", () => {
   it("يعطي لون النجاح للحالات المكتملة والنشطة", () => {
@@ -96,5 +96,13 @@ describe("budget limit validation", () => {
     const entries = [{ id: "c1", projectId: "p", taskId: "t", agent: "A", task: "T", model: "M", tokens: 10, duration: "1د", cost: 1.9 }];
     expect(buildHubAlerts([], entries, 3)).toHaveLength(0);
     expect(buildHubAlerts([], entries, 2.5)).toHaveLength(1);
+  });
+});
+
+describe("budget change history", () => {
+  it("يحدد اتجاه الرفع والتخفيض وعدم التغيير في سجل الميزانية", () => {
+    expect(budgetChangeDirection({ previousLimit: 2, newLimit: 3 })).toBe("increase");
+    expect(budgetChangeDirection({ previousLimit: 3, newLimit: 2 })).toBe("decrease");
+    expect(budgetChangeDirection({ previousLimit: 2.5, newLimit: 2.5 })).toBe("unchanged");
   });
 });

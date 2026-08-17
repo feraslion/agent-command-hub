@@ -121,6 +121,15 @@ export type NotificationPreferences = {
   device: boolean;
 };
 
+export type BudgetLimitChange = {
+  id: string;
+  previousLimit: number;
+  newLimit: number;
+  actor: string;
+  source: string;
+  time: string;
+};
+
 export const defaultNotificationPreferences: NotificationPreferences = {
   approvals: true,
   budget: true,
@@ -313,6 +322,11 @@ const initialApprovals: ApprovalRequest[] = [
   { id: "a4", projectId: activeProjectId, taskId: "t2", title: "اعتماد قرار المعمارية", detail: "تمت مراجعة قرار فصل عقود API عن واجهة الجوال.", requestedBy: "Reviewer Agent", level: "REVIEW", impact: "متوسط — قرار معماري", status: "معتمد", createdAt: "منذ 26 دقيقة" },
 ];
 
+const initialBudgetHistory: BudgetLimitChange[] = [
+  { id: "budget-1", previousLimit: 2.0, newLimit: 2.5, actor: "مالك المشروع", source: "إعدادات الإشعارات", time: "قبل 28 دقيقة" },
+  { id: "budget-2", previousLimit: 3.0, newLimit: 2.0, actor: "Planner Agent", source: "مراجعة خطة التنفيذ", time: "قبل ساعة" },
+];
+
 type HubContextValue = {
   projects: Project[];
   agents: Agent[];
@@ -323,6 +337,7 @@ type HubContextValue = {
   costEntries: CostEntry[];
   approvals: ApprovalRequest[];
   budgetLimit: number;
+  budgetHistory: BudgetLimitChange[];
   setBudgetLimit: (value: number) => boolean;
   alerts: HubAlert[];
   unreadAlertCount: number;
@@ -348,6 +363,7 @@ export function HubProvider({ children }: PropsWithChildren) {
   const [messages, setMessages] = useState(initialMessages);
   const [approvals, setApprovals] = useState(initialApprovals);
   const [budgetLimit, setBudgetLimitState] = useState(2.5);
+  const [budgetHistory, setBudgetHistory] = useState(initialBudgetHistory);
   const [readAlertIds, setReadAlertIds] = useState<string[]>([]);
   const [notificationPreferences, setNotificationPreferences] = useState(defaultNotificationPreferences);
   const nativeNotificationsEnabled = notificationPreferences.device;
@@ -399,7 +415,17 @@ export function HubProvider({ children }: PropsWithChildren) {
   const rejectRequest = (requestId: string) => resolveRequest(requestId, "مرفوض");
   const setBudgetLimit = (value: number) => {
     if (!isValidBudgetLimit(value)) return false;
-    setBudgetLimitState(Math.round(value * 100) / 100);
+    const nextLimit = Math.round(value * 100) / 100;
+    if (nextLimit === budgetLimit) return true;
+    setBudgetLimitState(nextLimit);
+    setBudgetHistory((current) => [{
+      id: `budget-${Date.now()}`,
+      previousLimit: budgetLimit,
+      newLimit: nextLimit,
+      actor: "مالك المشروع",
+      source: "إعدادات الإشعارات",
+      time: "الآن",
+    }, ...current]);
     return true;
   };
 
@@ -409,7 +435,7 @@ export function HubProvider({ children }: PropsWithChildren) {
   const markAllAlertsRead = () => setReadAlertIds(alerts.map((alert) => alert.id));
   const setNotificationPreference = (key: keyof NotificationPreferences, enabled: boolean) => setNotificationPreferences((current) => ({ ...current, [key]: enabled }));
 
-  const value = useMemo(() => ({ projects, agents: initialAgents, tasks, events, decisions: initialDecisions, messages, costEntries: initialCostEntries, approvals, budgetLimit, setBudgetLimit, alerts, unreadAlertCount, nativeNotificationsEnabled, notificationPreferences, activeProject, addProject, requestVerification, sendMessage, approveRequest, rejectRequest, markAlertRead, markAllAlertsRead, setNotificationPreference }), [projects, tasks, events, messages, approvals, budgetLimit, alerts, unreadAlertCount, nativeNotificationsEnabled, notificationPreferences, activeProject]);
+  const value = useMemo(() => ({ projects, agents: initialAgents, tasks, events, decisions: initialDecisions, messages, costEntries: initialCostEntries, approvals, budgetLimit, budgetHistory, setBudgetLimit, alerts, unreadAlertCount, nativeNotificationsEnabled, notificationPreferences, activeProject, addProject, requestVerification, sendMessage, approveRequest, rejectRequest, markAlertRead, markAllAlertsRead, setNotificationPreference }), [projects, tasks, events, messages, approvals, budgetLimit, budgetHistory, alerts, unreadAlertCount, nativeNotificationsEnabled, notificationPreferences, activeProject]);
   return <HubContext.Provider value={value}>{children}</HubContext.Provider>;
 }
 
@@ -442,6 +468,12 @@ export function getBudgetSummary(entries: CostEntry[], budgetLimit: number) {
 
 export function isValidBudgetLimit(value: number) {
   return Number.isFinite(value) && value >= 0.5 && value <= 10000;
+}
+
+export function budgetChangeDirection(change: Pick<BudgetLimitChange, "previousLimit" | "newLimit">) {
+  if (change.newLimit > change.previousLimit) return "increase" as const;
+  if (change.newLimit < change.previousLimit) return "decrease" as const;
+  return "unchanged" as const;
 }
 
 export function alertTone(severity: AlertSeverity) {

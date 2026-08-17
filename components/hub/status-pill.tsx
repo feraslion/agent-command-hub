@@ -18,6 +18,6 @@ export function StatusPill({ label, tone = "muted" }: { label: string; tone?: ke
 }
 
 const styles = StyleSheet.create({
-  pill: { alignSelf: "flex-start", borderRadius: 999, paddingHorizontal: 10, paddingVertical: 5 },
-  text: { fontSize: 12, fontWeight: "700", textAlign: "center" },
+  pill: { alignItems: "center", alignSelf: "flex-start", borderRadius: 999, justifyContent: "center", minHeight: 26, paddingHorizontal: 11, paddingVertical: 5 },
+  text: { fontSize: 11, fontWeight: "800", letterSpacing: 0.1, textAlign: "center" },
 });

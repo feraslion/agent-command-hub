@@ -3,6 +3,7 @@ import { ScreenContainer } from "@/components/screen-container";
 import { StatusPill } from "@/components/hub/status-pill";
 import { SectionTitle } from "@/components/hub/section-title";
 import { trpc } from "@/lib/trpc";
+import { useResponsiveLayout } from "@/components/hub/responsive";
 
 const statusLabel = {
   planning: "قيد التخطيط",
@@ -22,6 +23,7 @@ const statusTone = {
 
 export default function ProjectsScreen() {
   const projectsQuery = trpc.projects.list.useQuery();
+  const { isWide, contentMaxWidth } = useResponsiveLayout();
   const utils = trpc.useUtils();
   const createMutation = trpc.projects.create.useMutation({
     onSuccess: () => utils.projects.list.invalidate(),
@@ -44,9 +46,12 @@ export default function ProjectsScreen() {
   return (
     <ScreenContainer className="px-5" containerClassName="bg-[#F7F7FC]">
       <FlatList
+        key={isWide ? "projects-wide" : "projects-compact"}
         data={projects}
+        numColumns={isWide ? 2 : 1}
         keyExtractor={(item) => String(item.id)}
-        contentContainerStyle={styles.list}
+        contentContainerStyle={[styles.list, contentMaxWidth ? { maxWidth: contentMaxWidth, alignSelf: "center", width: "100%" } : undefined]}
+        columnWrapperStyle={isWide && projects.length > 0 ? styles.gridRow : undefined}
         ListHeaderComponent={
           <View>
             <Text style={styles.eyebrow}>محفظة التنفيذ</Text>
@@ -61,7 +66,7 @@ export default function ProjectsScreen() {
             <SectionTitle title="كل المشاريع" caption={projectsQuery.isLoading ? "جارٍ التحميل من قاعدة البيانات…" : `${projects.length} مشاريع محفوظة`} />
           </View>
         }
-        renderItem={({ item }) => <ProjectCard project={item} />}
+        renderItem={({ item }) => <ProjectCard project={item} wide={isWide} />}
         ItemSeparatorComponent={() => <View style={styles.separator} />}
         ListEmptyComponent={!projectsQuery.isLoading && !errorText ? <View style={styles.empty}><Text style={styles.emptyTitle}>لا توجد مشاريع محفوظة بعد</Text><Text style={styles.emptyText}>أنشئ مشروعاً ليصبح نقطة البداية للمهام والأحداث والموافقات الفعلية.</Text></View> : null}
       />
@@ -69,9 +74,9 @@ export default function ProjectsScreen() {
   );
 }
 
-function ProjectCard({ project }: { project: { id: number; name: string; code: string; status: keyof typeof statusLabel; progress: number; currentStage: string; updatedAt: Date } }) {
+function ProjectCard({ project, wide }: { project: { id: number; name: string; code: string; status: keyof typeof statusLabel; progress: number; currentStage: string; updatedAt: Date }; wide: boolean }) {
   return (
-    <View style={styles.card}>
+    <View style={[styles.card, wide && styles.cardWide]}>
       <View style={styles.cardTop}>
         <View style={styles.code}><Text style={styles.codeText}>{project.code}</Text></View>
         <StatusPill label={statusLabel[project.status]} tone={statusTone[project.status]} />
@@ -90,17 +95,18 @@ function formatUpdatedAt(value: Date) {
 }
 
 const styles = StyleSheet.create({
-  list: { paddingTop: 18, paddingBottom: 104 },
+  list: { paddingBottom: 104, paddingTop: 18 },
   eyebrow: { color: "#4F46E5", fontSize: 13, fontWeight: "800", textAlign: "right" },
   heading: { color: "#171725", fontSize: 32, fontWeight: "900", marginTop: 3, textAlign: "right" },
   subheading: { color: "#6F7487", fontSize: 15, lineHeight: 22, marginTop: 8, textAlign: "right" },
-  createButton: { alignItems: "center", backgroundColor: "#4F46E5", borderRadius: 16, flexDirection: "row-reverse", justifyContent: "center", marginBottom: 20, marginTop: 20, paddingHorizontal: 16, paddingVertical: 15 },
+  createButton: { alignItems: "center", backgroundColor: "#4F46E5", borderRadius: 16, flexDirection: "row-reverse", justifyContent: "center", marginBottom: 20, marginTop: 20, minHeight: 52, paddingHorizontal: 16, paddingVertical: 15, shadowColor: "#3730A3", shadowOffset: { width: 0, height: 6 }, shadowOpacity: 0.16, shadowRadius: 12, elevation: 3 },
   createButtonText: { color: "#FFFFFF", fontSize: 15, fontWeight: "800" },
   plus: { color: "#FFFFFF", fontSize: 20, fontWeight: "400", marginLeft: 8 },
   pressed: { opacity: 0.68, transform: [{ scale: 0.98 }] },
   error: { backgroundColor: "#FFF0F2", borderColor: "#FFC7CF", borderRadius: 14, borderWidth: 1, marginBottom: 20, padding: 12 },
   errorText: { color: "#B4233B", fontSize: 13, lineHeight: 19, textAlign: "right" },
-  card: { backgroundColor: "#FFFFFF", borderColor: "#EAECF2", borderRadius: 20, borderWidth: 1, padding: 17 },
+  card: { backgroundColor: "#FFFFFF", borderColor: "#EAECF2", borderRadius: 20, borderWidth: 1, padding: 17, shadowColor: "#26324A", shadowOffset: { width: 0, height: 5 }, shadowOpacity: 0.05, shadowRadius: 12, elevation: 2 },
+  cardWide: { flex: 1 },
   cardTop: { alignItems: "center", flexDirection: "row-reverse", justifyContent: "space-between" },
   code: { backgroundColor: "#F0EFFF", borderRadius: 9, paddingHorizontal: 9, paddingVertical: 5 },
   codeText: { color: "#4F46E5", fontSize: 12, fontWeight: "800" },
@@ -112,6 +118,7 @@ const styles = StyleSheet.create({
   updated: { color: "#8A90A3", fontSize: 12 },
   progressLabel: { color: "#3D4052", fontSize: 12, fontWeight: "700" },
   separator: { height: 12 },
+  gridRow: { gap: 12, marginBottom: 12 },
   empty: { alignItems: "center", backgroundColor: "#FFFFFF", borderColor: "#EAECF2", borderRadius: 20, borderWidth: 1, padding: 24 },
   emptyTitle: { color: "#353747", fontSize: 16, fontWeight: "900" },
   emptyText: { color: "#757B8E", fontSize: 13, lineHeight: 20, marginTop: 7, textAlign: "center" },

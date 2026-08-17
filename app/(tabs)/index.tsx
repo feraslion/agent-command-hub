@@ -3,6 +3,7 @@ import { useRouter } from "expo-router";
 
 import { ScreenContainer } from "@/components/screen-container";
 import { StatusPill } from "@/components/hub/status-pill";
+import { useResponsiveLayout } from "@/components/hub/responsive";
 import { useAgentHub } from "@/lib/agent-hub";
 
 /**
@@ -19,6 +20,7 @@ import { useAgentHub } from "@/lib/agent-hub";
  */
 export default function HomeScreen() {
   const router = useRouter();
+  const { isCompact, isWide, contentMaxWidth } = useResponsiveLayout();
   const { activeProject, events, tasks, decisions, requestVerification, unreadAlertCount } = useAgentHub();
   const activeTask = tasks.find((task) => task.status === "قيد التنفيذ");
   const doneStages = tasks.filter((task) => task.status === "مكتمل").length;
@@ -27,15 +29,12 @@ export default function HomeScreen() {
   return (
     <ScreenContainer className="px-5" containerClassName="bg-[#F7F7FC]">
       <ScrollView contentContainerStyle={styles.scroll} showsVerticalScrollIndicator={false}>
-        <View style={styles.topline}><View><Text style={styles.eyebrow}>لوحة قيادة التنفيذ</Text><Text style={styles.heading}>مرحباً بك</Text></View><View style={styles.topActions}><Pressable onPress={() => router.push("/alerts")} style={({ pressed }) => [styles.alertButton, pressed && styles.pressed]}><Text style={styles.alertButtonText}>التنبيهات</Text>{unreadAlertCount ? <View style={styles.alertBadge}><Text style={styles.alertBadgeText}>{unreadAlertCount}</Text></View> : null}</Pressable><View style={styles.live}><View style={styles.liveDot} /><Text style={styles.liveText}>حيّ</Text></View></View></View>
-        <View style={styles.hero}><View style={styles.heroTop}><View><Text style={styles.projectCode}>المشروع · {activeProject.code}</Text><Text style={styles.projectName}>{activeProject.name}</Text></View><StatusPill label={activeProject.status} tone="primary" /></View><View style={styles.progressRow}><View><Text style={styles.progressNumber}>{activeProject.progress}%</Text><Text style={styles.progressCaption}>تقدم التنفيذ</Text></View><Text style={styles.stageLabel}>{activeProject.currentStage}</Text></View><View style={styles.progressTrack}><View style={[styles.progressFill, { width: `${activeProject.progress}%` }]} /></View><View style={styles.agentFocus}><View style={styles.agentMark}><Text style={styles.agentMarkText}>B</Text></View><View style={styles.agentDetails}><Text style={styles.currentLabel}>الوكيل الحالي</Text><Text style={styles.agentName}>{activeProject.currentAgent}</Text></View><Text style={styles.now}>الآن</Text></View></View>
-        <View style={styles.sectionHeader}><Text style={styles.sectionTitle}>سلسلة التنفيذ</Text><Text style={styles.sectionMeta}>{doneStages} مكتملة من {tasks.length}</Text></View>
-        <View style={styles.pipeline}><PipelineRow label="المتطلبات" status="مكتمل" active={false} /><PipelineRow label="المعمارية" status="مكتمل" active={false} /><PipelineRow label="بناء الواجهة" status="مكتمل" active={false} /><PipelineRow label="بناء الخلفية" status="قيد التنفيذ" active /><PipelineRow label="التحقق" status="قادم" active={false} /><PipelineRow label="المراجعة" status="قادم" active={false} /></View>
-        {activeTask ? <Pressable onPress={() => requestVerification(activeTask.id)} style={({ pressed }) => [styles.action, pressed && styles.pressed]}><Text style={styles.actionText}>إرسال المهمة الحالية إلى التحقق</Text><Text style={styles.actionArrow}>←</Text></Pressable> : null}
-        <View style={styles.sectionHeader}><Text style={styles.sectionTitle}>سجل التنفيذ</Text><Text style={styles.sectionMeta}>منظم وقابل للتتبع</Text></View>
-        {latestEvent ? <EventRow label={latestEvent.label} actor={latestEvent.actor} time={latestEvent.time} detail={latestEvent.detail} /> : null}
-        {priorEvent ? <EventRow label={priorEvent.label} actor={priorEvent.actor} time={priorEvent.time} detail={priorEvent.detail} muted /> : null}
-        <View style={styles.decision}><View><Text style={styles.decisionCode}>{decisions[0].code}</Text><Text style={styles.decisionTitle}>ذاكرة القرار</Text></View><Text style={styles.decisionText}>{decisions[0].decision}</Text><Text style={styles.decisionReason}>{decisions[0].reason}</Text></View>
+        <View style={[styles.content, contentMaxWidth ? { maxWidth: contentMaxWidth } : undefined]}>
+          <View style={[styles.topline, isCompact && styles.toplineCompact]}><View><Text style={styles.eyebrow}>لوحة قيادة التنفيذ</Text><Text style={[styles.heading, isCompact && styles.headingCompact]}>مرحباً بك</Text></View><View style={styles.topActions}><Pressable onPress={() => router.push("/alerts")} style={({ pressed }) => [styles.alertButton, pressed && styles.pressed]}><Text style={styles.alertButtonText}>التنبيهات</Text>{unreadAlertCount ? <View style={styles.alertBadge}><Text style={styles.alertBadgeText}>{unreadAlertCount}</Text></View> : null}</Pressable><View style={styles.live}><View style={styles.liveDot} /><Text style={styles.liveText}>حيّ</Text></View></View></View>
+          <View style={[styles.hero, isWide && styles.heroWide]}><View style={styles.heroTop}><View style={styles.heroTitleWrap}><Text style={styles.projectCode}>المشروع · {activeProject.code}</Text><Text style={styles.projectName}>{activeProject.name}</Text></View><StatusPill label={activeProject.status} tone="primary" /></View><View style={styles.progressRow}><View><Text style={[styles.progressNumber, isWide && styles.progressNumberWide]}>{activeProject.progress}%</Text><Text style={styles.progressCaption}>تقدم التنفيذ</Text></View><Text style={styles.stageLabel}>{activeProject.currentStage}</Text></View><View style={styles.progressTrack}><View style={[styles.progressFill, { width: `${activeProject.progress}%` }]} /></View><View style={styles.agentFocus}><View style={styles.agentMark}><Text style={styles.agentMarkText}>B</Text></View><View style={styles.agentDetails}><Text style={styles.currentLabel}>الوكيل الحالي</Text><Text style={styles.agentName}>{activeProject.currentAgent}</Text></View><Text style={styles.now}>الآن</Text></View></View>
+          <View style={[styles.metricStrip, isWide && styles.metricStripWide]}><Metric label="المهام المكتملة" value={`${doneStages}/${tasks.length}`} /><Metric label="الحالة" value="قيد البناء" accent /><Metric label="الأحداث الحديثة" value={`${events.length}`} /></View>
+          <View style={[styles.dashboardGrid, isWide && styles.dashboardGridWide]}><View style={styles.primaryColumn}><View style={styles.sectionHeader}><Text style={styles.sectionTitle}>سلسلة التنفيذ</Text><Text style={styles.sectionMeta}>{doneStages} مكتملة من {tasks.length}</Text></View><View style={styles.pipeline}><PipelineRow label="المتطلبات" status="مكتمل" active={false} /><PipelineRow label="المعمارية" status="مكتمل" active={false} /><PipelineRow label="بناء الواجهة" status="مكتمل" active={false} /><PipelineRow label="بناء الخلفية" status="قيد التنفيذ" active /><PipelineRow label="التحقق" status="قادم" active={false} /><PipelineRow label="المراجعة" status="قادم" active={false} /></View>{activeTask ? <Pressable onPress={() => requestVerification(activeTask.id)} style={({ pressed }) => [styles.action, pressed && styles.pressed]}><Text style={styles.actionText}>إرسال المهمة الحالية إلى التحقق</Text><Text style={styles.actionArrow}>←</Text></Pressable> : null}</View><View style={[styles.secondaryColumn, isWide && styles.secondaryColumnWide]}><View style={styles.sectionHeader}><Text style={styles.sectionTitle}>سجل التنفيذ</Text><Text style={styles.sectionMeta}>منظم وقابل للتتبع</Text></View>{latestEvent ? <EventRow label={latestEvent.label} actor={latestEvent.actor} time={latestEvent.time} detail={latestEvent.detail} /> : null}{priorEvent ? <EventRow label={priorEvent.label} actor={priorEvent.actor} time={priorEvent.time} detail={priorEvent.detail} muted /> : null}<View style={styles.decision}><View><Text style={styles.decisionCode}>{decisions[0].code}</Text><Text style={styles.decisionTitle}>ذاكرة القرار</Text></View><Text style={styles.decisionText}>{decisions[0].decision}</Text><Text style={styles.decisionReason}>{decisions[0].reason}</Text></View></View></View>
+        </View>
       </ScrollView>
     </ScreenContainer>
   );
@@ -49,9 +48,15 @@ function EventRow({ label, actor, time, detail, muted = false }: { label: string
   return <View style={[styles.event, muted && styles.eventMuted]}><View style={styles.eventTop}><Text style={styles.eventLabel}>{label}</Text><Text style={styles.eventTime}>{time}</Text></View><Text style={styles.eventActor}>{actor}</Text><Text style={styles.eventDetail}>{detail}</Text></View>;
 }
 
+function Metric({ label, value, accent = false }: { label: string; value: string; accent?: boolean }) {
+  return <View style={styles.metric}><Text style={[styles.metricValue, accent && styles.metricValueAccent]}>{value}</Text><Text style={styles.metricLabel}>{label}</Text></View>;
+}
+
 const styles = StyleSheet.create({
   scroll: { paddingBottom: 104, paddingTop: 18 },
+  content: { alignSelf: "center", width: "100%" },
   topline: { alignItems: "flex-start", flexDirection: "row-reverse", justifyContent: "space-between" },
+  toplineCompact: { alignItems: "flex-end", gap: 10 },
   topActions: { alignItems: "center", flexDirection: "row-reverse", gap: 7, marginTop: 4 },
   alertButton: { alignItems: "center", backgroundColor: "#FFFFFF", borderColor: "#E5E7EF", borderRadius: 99, borderWidth: 1, flexDirection: "row-reverse", paddingHorizontal: 9, paddingVertical: 6 },
   alertButtonText: { color: "#4F46E5", fontSize: 11, fontWeight: "900" },
@@ -59,15 +64,19 @@ const styles = StyleSheet.create({
   alertBadgeText: { color: "#FFFFFF", fontSize: 10, fontWeight: "900" },
   eyebrow: { color: "#4F46E5", fontSize: 13, fontWeight: "800", textAlign: "right" },
   heading: { color: "#191A28", fontSize: 30, fontWeight: "900", marginTop: 3, textAlign: "right" },
+  headingCompact: { fontSize: 27 },
   live: { alignItems: "center", backgroundColor: "#E9F7EF", borderRadius: 99, flexDirection: "row-reverse", marginTop: 7, paddingHorizontal: 9, paddingVertical: 6 },
   liveDot: { backgroundColor: "#18A56B", borderRadius: 10, height: 7, marginLeft: 5, width: 7 },
   liveText: { color: "#167649", fontSize: 11, fontWeight: "800" },
-  hero: { backgroundColor: "#FFFFFF", borderColor: "#E9EAF1", borderRadius: 22, borderWidth: 1, marginTop: 19, padding: 18 },
+  hero: { backgroundColor: "#FFFFFF", borderColor: "#E9EAF1", borderRadius: 24, borderWidth: 1, marginTop: 19, padding: 19, shadowColor: "#26324A", shadowOffset: { width: 0, height: 8 }, shadowOpacity: 0.07, shadowRadius: 18, elevation: 3 },
+  heroWide: { padding: 28 },
   heroTop: { alignItems: "flex-start", flexDirection: "row-reverse", justifyContent: "space-between" },
   projectCode: { color: "#777D91", fontSize: 12, textAlign: "right" },
+  heroTitleWrap: { flex: 1, marginLeft: 12 },
   projectName: { color: "#202231", fontSize: 19, fontWeight: "900", marginTop: 5, textAlign: "right" },
   progressRow: { alignItems: "flex-end", flexDirection: "row-reverse", justifyContent: "space-between", marginTop: 25 },
   progressNumber: { color: "#4F46E5", fontSize: 29, fontWeight: "900", textAlign: "right" },
+  progressNumberWide: { fontSize: 34 },
   progressCaption: { color: "#8B90A2", fontSize: 11, marginTop: 2, textAlign: "right" },
   stageLabel: { color: "#36394A", fontSize: 13, fontWeight: "800" },
   progressTrack: { backgroundColor: "#E9EAF2", borderRadius: 99, height: 9, marginTop: 10, overflow: "hidden" },
@@ -79,6 +88,17 @@ const styles = StyleSheet.create({
   currentLabel: { color: "#888EA0", fontSize: 11, textAlign: "right" },
   agentName: { color: "#333648", fontSize: 13, fontWeight: "800", marginTop: 2, textAlign: "right" },
   now: { color: "#18A56B", fontSize: 11, fontWeight: "800" },
+  metricStrip: { backgroundColor: "#FFFFFF", borderColor: "#E9EAF1", borderRadius: 18, borderWidth: 1, flexDirection: "row-reverse", justifyContent: "space-between", marginTop: 12, paddingHorizontal: 14, paddingVertical: 13 },
+  metricStripWide: { paddingHorizontal: 22, paddingVertical: 15 },
+  metric: { alignItems: "flex-end", flex: 1 },
+  metricValue: { color: "#2C3041", fontSize: 16, fontWeight: "900" },
+  metricValueAccent: { color: "#4F46E5" },
+  metricLabel: { color: "#868C9E", fontSize: 10, marginTop: 4, textAlign: "right" },
+  dashboardGrid: { flexDirection: "column" },
+  dashboardGridWide: { alignItems: "flex-start", flexDirection: "row-reverse", gap: 18 },
+  primaryColumn: { flex: 1, width: "100%" },
+  secondaryColumn: { width: "100%" },
+  secondaryColumnWide: { flex: 0.9 },
   sectionHeader: { alignItems: "center", flexDirection: "row-reverse", justifyContent: "space-between", marginBottom: 11, marginTop: 24 },
   sectionTitle: { color: "#252737", fontSize: 18, fontWeight: "900", textAlign: "right" },
   sectionMeta: { color: "#858B9D", fontSize: 11, textAlign: "left" },

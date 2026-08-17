@@ -115,6 +115,18 @@ export type HubAlert = {
   read: boolean;
 };
 
+export type NotificationPreferences = {
+  approvals: boolean;
+  budget: boolean;
+  device: boolean;
+};
+
+export const defaultNotificationPreferences: NotificationPreferences = {
+  approvals: true,
+  budget: true,
+  device: false,
+};
+
 const activeProjectId = "ad1";
 
 const initialProjects: Project[] = [
@@ -314,6 +326,7 @@ type HubContextValue = {
   alerts: HubAlert[];
   unreadAlertCount: number;
   nativeNotificationsEnabled: boolean;
+  notificationPreferences: NotificationPreferences;
   activeProject: Project;
   addProject: () => void;
   requestVerification: (taskId: string) => void;
@@ -322,7 +335,7 @@ type HubContextValue = {
   rejectRequest: (requestId: string) => void;
   markAlertRead: (alertId: string) => void;
   markAllAlertsRead: () => void;
-  setNativeNotificationsEnabled: (enabled: boolean) => void;
+  setNotificationPreference: (key: keyof NotificationPreferences, enabled: boolean) => void;
 };
 
 const HubContext = createContext<HubContextValue | null>(null);
@@ -335,7 +348,8 @@ export function HubProvider({ children }: PropsWithChildren) {
   const [approvals, setApprovals] = useState(initialApprovals);
   const [budgetLimit] = useState(2.5);
   const [readAlertIds, setReadAlertIds] = useState<string[]>([]);
-  const [nativeNotificationsEnabled, setNativeNotificationsEnabled] = useState(false);
+  const [notificationPreferences, setNotificationPreferences] = useState(defaultNotificationPreferences);
+  const nativeNotificationsEnabled = notificationPreferences.device;
   const activeProject = projects.find((project) => project.id === activeProjectId) ?? projects[0];
 
   const addProject = () => {
@@ -383,12 +397,13 @@ export function HubProvider({ children }: PropsWithChildren) {
   const approveRequest = (requestId: string) => resolveRequest(requestId, "معتمد");
   const rejectRequest = (requestId: string) => resolveRequest(requestId, "مرفوض");
 
-  const alerts = useMemo(() => buildHubAlerts(approvals, initialCostEntries, budgetLimit, readAlertIds), [approvals, budgetLimit, readAlertIds]);
+  const alerts = useMemo(() => buildHubAlerts(approvals, initialCostEntries, budgetLimit, readAlertIds, notificationPreferences), [approvals, budgetLimit, readAlertIds, notificationPreferences]);
   const unreadAlertCount = alerts.filter((alert) => !alert.read).length;
   const markAlertRead = (alertId: string) => setReadAlertIds((current) => current.includes(alertId) ? current : [...current, alertId]);
   const markAllAlertsRead = () => setReadAlertIds(alerts.map((alert) => alert.id));
+  const setNotificationPreference = (key: keyof NotificationPreferences, enabled: boolean) => setNotificationPreferences((current) => ({ ...current, [key]: enabled }));
 
-  const value = useMemo(() => ({ projects, agents: initialAgents, tasks, events, decisions: initialDecisions, messages, costEntries: initialCostEntries, approvals, budgetLimit, alerts, unreadAlertCount, nativeNotificationsEnabled, activeProject, addProject, requestVerification, sendMessage, approveRequest, rejectRequest, markAlertRead, markAllAlertsRead, setNativeNotificationsEnabled }), [projects, tasks, events, messages, approvals, budgetLimit, alerts, unreadAlertCount, nativeNotificationsEnabled, activeProject]);
+  const value = useMemo(() => ({ projects, agents: initialAgents, tasks, events, decisions: initialDecisions, messages, costEntries: initialCostEntries, approvals, budgetLimit, alerts, unreadAlertCount, nativeNotificationsEnabled, notificationPreferences, activeProject, addProject, requestVerification, sendMessage, approveRequest, rejectRequest, markAlertRead, markAllAlertsRead, setNotificationPreference }), [projects, tasks, events, messages, approvals, budgetLimit, alerts, unreadAlertCount, nativeNotificationsEnabled, notificationPreferences, activeProject]);
   return <HubContext.Provider value={value}>{children}</HubContext.Provider>;
 }
 
@@ -423,16 +438,16 @@ export function alertTone(severity: AlertSeverity) {
   return severity === "budget" ? "warning" as const : "primary" as const;
 }
 
-export function buildHubAlerts(approvals: ApprovalRequest[], entries: CostEntry[], budgetLimit: number, readAlertIds: string[] = []): HubAlert[] {
-  const pendingApprovals = approvals.filter((approval) => approval.status === "قيد الانتظار").map((approval) => ({
+export function buildHubAlerts(approvals: ApprovalRequest[], entries: CostEntry[], budgetLimit: number, readAlertIds: string[] = [], preferences: NotificationPreferences = defaultNotificationPreferences): HubAlert[] {
+  const pendingApprovals = preferences.approvals ? approvals.filter((approval) => approval.status === "قيد الانتظار").map((approval) => ({
     id: `approval-${approval.id}`,
     severity: "approval" as const,
     title: `موافقة معلقة: ${approval.title}`,
     description: `${approval.level} · ${approval.impact}`,
     time: approval.createdAt,
-  }));
+  })) : [];
   const budget = getBudgetSummary(entries, budgetLimit);
-  const budgetAlert = budget.percent >= 75 ? [{
+  const budgetAlert = preferences.budget && budget.percent >= 75 ? [{
     id: "budget-threshold",
     severity: "budget" as const,
     title: `تنبيه الميزانية: ${budget.percent}% مستخدم`,

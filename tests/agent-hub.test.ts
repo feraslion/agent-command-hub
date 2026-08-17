@@ -70,4 +70,15 @@ describe("buildHubAlerts", () => {
     expect(alertTone("approval")).toBe("primary");
     expect(alertTone("budget")).toBe("warning");
   });
+
+  it("يطبّق تفضيلات المستخدم على أنواع التنبيه المعروضة", () => {
+    const alerts = buildHubAlerts([
+      { id: "a1", projectId: "p", title: "اعتماد مطلوب", detail: "تفاصيل", requestedBy: "Agent", level: "APPROVAL", impact: "مرتفع", status: "قيد الانتظار", createdAt: "الآن" },
+    ], [
+      { id: "c1", projectId: "p", taskId: "t", agent: "A", task: "T", model: "M", tokens: 10, duration: "1د", cost: 2 },
+    ], 2.5, [], { approvals: false, budget: true, device: false });
+
+    expect(alerts).toHaveLength(1);
+    expect(alerts[0].severity).toBe("budget");
+  });
 });

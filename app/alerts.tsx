@@ -8,13 +8,13 @@ import { alertTone, useAgentHub, type HubAlert } from "@/lib/agent-hub";
 
 export default function AlertsScreen() {
   const router = useRouter();
-  const { alerts, unreadAlertCount, markAlertRead, markAllAlertsRead, setNativeNotificationsEnabled } = useAgentHub();
+  const { alerts, unreadAlertCount, markAlertRead, markAllAlertsRead, setNotificationPreference } = useAgentHub();
   const [deviceStatus, setDeviceStatus] = useState<"idle" | "enabled" | "denied" | "unsupported">("idle");
 
   const enableDeviceAlerts = async () => {
     const result = await requestDeviceNotificationPermission();
     if (result === "granted") {
-      setNativeNotificationsEnabled(true);
+      setNotificationPreference("device", true);
       setDeviceStatus("enabled");
     } else if (result === "unsupported") {
       setDeviceStatus("unsupported");
@@ -28,7 +28,7 @@ export default function AlertsScreen() {
     router.replace("/control");
   };
 
-  return <ScreenContainer className="px-5" containerClassName="bg-[#F7F7FC]"><FlatList data={alerts} keyExtractor={(item) => item.id} contentContainerStyle={styles.list} ListHeaderComponent={<View><View style={styles.header}><Pressable onPress={() => router.back()} style={({ pressed }) => [styles.back, pressed && styles.pressed]}><Text style={styles.backText}>← العودة</Text></Pressable><View><Text style={styles.eyebrow}>استجابة سريعة</Text><Text style={styles.heading}>التنبيهات</Text></View></View><View style={styles.summary}><View style={styles.summaryNumber}><Text style={styles.summaryNumberText}>{unreadAlertCount}</Text></View><View style={styles.summaryBody}><Text style={styles.summaryTitle}>تنبيهات تحتاج انتباهك</Text><Text style={styles.summaryCopy}>يظهر التنبيه فوراً عند وجود موافقة معلقة أو بلوغ 75% من سقف الميزانية.</Text></View></View><View style={styles.buttons}><Pressable onPress={markAllAlertsRead} style={({ pressed }) => [styles.readAll, pressed && styles.pressed]}><Text style={styles.readAllText}>تمييز الكل كمقروء</Text></Pressable><Pressable onPress={enableDeviceAlerts} style={({ pressed }) => [styles.enable, pressed && styles.pressed]}><Text style={styles.enableText}>{Platform.OS === "web" ? "تنبيهات داخلية" : "تفعيل تنبيهات الجهاز"}</Text></Pressable></View>{deviceStatus !== "idle" ? <Text style={styles.statusText}>{deviceStatus === "enabled" ? "تم تفعيل تنبيهات الجهاز لهذه الجلسة." : deviceStatus === "denied" ? "لم تُمنح صلاحية تنبيهات الجهاز؛ ستبقى التنبيهات داخل التطبيق فعالة." : "تنبيهات الجهاز غير مدعومة على الويب؛ استخدم مركز التنبيهات داخل التطبيق."}</Text> : null}</View>} renderItem={({ item }) => <AlertCard alert={item} onPress={() => openAlert(item)} />} ItemSeparatorComponent={() => <View style={styles.separator} />} ListEmptyComponent={<View style={styles.empty}><Text style={styles.emptyTitle}>لا توجد تنبيهات جديدة</Text><Text style={styles.emptyText}>ستظهر هنا طلبات الموافقة والتنبيهات الخاصة بالميزانية عند تحققها.</Text></View>} /></ScreenContainer>;
+  return <ScreenContainer className="px-5" containerClassName="bg-[#F7F7FC]"><FlatList data={alerts} keyExtractor={(item) => item.id} contentContainerStyle={styles.list} ListHeaderComponent={<View><View style={styles.header}><Pressable onPress={() => router.back()} style={({ pressed }) => [styles.back, pressed && styles.pressed]}><Text style={styles.backText}>← العودة</Text></Pressable><View style={styles.headerTitle}><Pressable onPress={() => router.push("/settings" as never)} style={({ pressed }) => [styles.settingsButton, pressed && styles.pressed]}><Text style={styles.settingsText}>الإعدادات</Text></Pressable><View><Text style={styles.eyebrow}>استجابة سريعة</Text><Text style={styles.heading}>التنبيهات</Text></View></View></View><View style={styles.summary}><View style={styles.summaryNumber}><Text style={styles.summaryNumberText}>{unreadAlertCount}</Text></View><View style={styles.summaryBody}><Text style={styles.summaryTitle}>تنبيهات تحتاج انتباهك</Text><Text style={styles.summaryCopy}>يظهر التنبيه فوراً عند وجود موافقة معلقة أو بلوغ 75% من سقف الميزانية.</Text></View></View><View style={styles.buttons}><Pressable onPress={markAllAlertsRead} style={({ pressed }) => [styles.readAll, pressed && styles.pressed]}><Text style={styles.readAllText}>تمييز الكل كمقروء</Text></Pressable><Pressable onPress={enableDeviceAlerts} style={({ pressed }) => [styles.enable, pressed && styles.pressed]}><Text style={styles.enableText}>{Platform.OS === "web" ? "تنبيهات داخلية" : "تفعيل تنبيهات الجهاز"}</Text></Pressable></View>{deviceStatus !== "idle" ? <Text style={styles.statusText}>{deviceStatus === "enabled" ? "تم تفعيل تنبيهات الجهاز لهذه الجلسة." : deviceStatus === "denied" ? "لم تُمنح صلاحية تنبيهات الجهاز؛ ستبقى التنبيهات داخل التطبيق فعالة." : "تنبيهات الجهاز غير مدعومة على الويب؛ استخدم مركز التنبيهات داخل التطبيق."}</Text> : null}</View>} renderItem={({ item }) => <AlertCard alert={item} onPress={() => openAlert(item)} />} ItemSeparatorComponent={() => <View style={styles.separator} />} ListEmptyComponent={<View style={styles.empty}><Text style={styles.emptyTitle}>لا توجد تنبيهات جديدة</Text><Text style={styles.emptyText}>ستظهر هنا طلبات الموافقة والتنبيهات الخاصة بالميزانية عند تحققها.</Text></View>} /></ScreenContainer>;
 }
 
 function AlertCard({ alert, onPress }: { alert: HubAlert; onPress: () => void }) {
@@ -38,6 +38,9 @@ function AlertCard({ alert, onPress }: { alert: HubAlert; onPress: () => void })
 const styles = StyleSheet.create({
   list: { paddingBottom: 40, paddingTop: 18 },
   header: { alignItems: "flex-start", flexDirection: "row-reverse", justifyContent: "space-between" },
+  headerTitle: { alignItems: "flex-end", flexDirection: "row-reverse", gap: 9 },
+  settingsButton: { backgroundColor: "#FFFFFF", borderColor: "#E1E3EC", borderRadius: 99, borderWidth: 1, marginTop: 4, paddingHorizontal: 9, paddingVertical: 5 },
+  settingsText: { color: "#4F46E5", fontSize: 11, fontWeight: "900" },
   back: { paddingVertical: 7 },
   backText: { color: "#4F46E5", fontSize: 13, fontWeight: "900" },
   eyebrow: { color: "#4F46E5", fontSize: 12, fontWeight: "900", textAlign: "right" },

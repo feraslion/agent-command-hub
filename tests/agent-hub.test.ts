@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { approvalTone, getBudgetSummary, statusTone, type AgentStatus, type ProjectStatus, type TaskStatus } from "../lib/agent-hub";
+import { alertTone, approvalTone, buildHubAlerts, getBudgetSummary, statusTone, type AgentStatus, type ProjectStatus, type TaskStatus } from "../lib/agent-hub";
 
 describe("statusTone", () => {
   it("يعطي لون النجاح للحالات المكتملة والنشطة", () => {
@@ -44,5 +44,30 @@ describe("approvalTone", () => {
     expect(approvalTone("معتمد")).toBe("success");
     expect(approvalTone("قيد الانتظار")).toBe("warning");
     expect(approvalTone("مرفوض")).toBe("error");
+  });
+});
+
+describe("buildHubAlerts", () => {
+  it("ينشئ تنبيهاً لكل طلب موافقة معلق وتنبيهاً عند بلوغ 75% من الميزانية", () => {
+    const alerts = buildHubAlerts([
+      { id: "a1", projectId: "p", title: "نشر الإصدار", detail: "تفاصيل", requestedBy: "Orchestrator", level: "APPROVAL", impact: "مرتفع", status: "قيد الانتظار", createdAt: "الآن" },
+      { id: "a2", projectId: "p", title: "قرار مكتمل", detail: "تفاصيل", requestedBy: "Reviewer", level: "REVIEW", impact: "متوسط", status: "معتمد", createdAt: "قبل قليل" },
+    ], [
+      { id: "c1", projectId: "p", taskId: "t", agent: "A", task: "T", model: "M", tokens: 10, duration: "1د", cost: 1.9 },
+    ], 2.5);
+
+    expect(alerts).toHaveLength(2);
+    expect(alerts.map((alert) => alert.severity)).toEqual(["approval", "budget"]);
+    expect(alerts.every((alert) => !alert.read)).toBe(true);
+  });
+
+  it("يحترم حالة القراءة ولا ينشئ تنبيه ميزانية قبل بلوغ العتبة", () => {
+    const alerts = buildHubAlerts([], [
+      { id: "c1", projectId: "p", taskId: "t", agent: "A", task: "T", model: "M", tokens: 10, duration: "1د", cost: 1.1 },
+    ], 2.5, ["budget-threshold"]);
+
+    expect(alerts).toHaveLength(0);
+    expect(alertTone("approval")).toBe("primary");
+    expect(alertTone("budget")).toBe("warning");
   });
 });

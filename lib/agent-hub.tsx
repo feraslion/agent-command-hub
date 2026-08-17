@@ -104,6 +104,17 @@ export type ApprovalRequest = {
   createdAt: string;
 };
 
+export type AlertSeverity = "approval" | "budget";
+
+export type HubAlert = {
+  id: string;
+  severity: AlertSeverity;
+  title: string;
+  description: string;
+  time: string;
+  read: boolean;
+};
+
 const activeProjectId = "ad1";
 
 const initialProjects: Project[] = [
@@ -300,12 +311,18 @@ type HubContextValue = {
   costEntries: CostEntry[];
   approvals: ApprovalRequest[];
   budgetLimit: number;
+  alerts: HubAlert[];
+  unreadAlertCount: number;
+  nativeNotificationsEnabled: boolean;
   activeProject: Project;
   addProject: () => void;
   requestVerification: (taskId: string) => void;
   sendMessage: (text: string) => void;
   approveRequest: (requestId: string) => void;
   rejectRequest: (requestId: string) => void;
+  markAlertRead: (alertId: string) => void;
+  markAllAlertsRead: () => void;
+  setNativeNotificationsEnabled: (enabled: boolean) => void;
 };
 
 const HubContext = createContext<HubContextValue | null>(null);
@@ -317,6 +334,8 @@ export function HubProvider({ children }: PropsWithChildren) {
   const [messages, setMessages] = useState(initialMessages);
   const [approvals, setApprovals] = useState(initialApprovals);
   const [budgetLimit] = useState(2.5);
+  const [readAlertIds, setReadAlertIds] = useState<string[]>([]);
+  const [nativeNotificationsEnabled, setNativeNotificationsEnabled] = useState(false);
   const activeProject = projects.find((project) => project.id === activeProjectId) ?? projects[0];
 
   const addProject = () => {
@@ -364,7 +383,12 @@ export function HubProvider({ children }: PropsWithChildren) {
   const approveRequest = (requestId: string) => resolveRequest(requestId, "معتمد");
   const rejectRequest = (requestId: string) => resolveRequest(requestId, "مرفوض");
 
-  const value = useMemo(() => ({ projects, agents: initialAgents, tasks, events, decisions: initialDecisions, messages, costEntries: initialCostEntries, approvals, budgetLimit, activeProject, addProject, requestVerification, sendMessage, approveRequest, rejectRequest }), [projects, tasks, events, messages, approvals, budgetLimit, activeProject]);
+  const alerts = useMemo(() => buildHubAlerts(approvals, initialCostEntries, budgetLimit, readAlertIds), [approvals, budgetLimit, readAlertIds]);
+  const unreadAlertCount = alerts.filter((alert) => !alert.read).length;
+  const markAlertRead = (alertId: string) => setReadAlertIds((current) => current.includes(alertId) ? current : [...current, alertId]);
+  const markAllAlertsRead = () => setReadAlertIds(alerts.map((alert) => alert.id));
+
+  const value = useMemo(() => ({ projects, agents: initialAgents, tasks, events, decisions: initialDecisions, messages, costEntries: initialCostEntries, approvals, budgetLimit, alerts, unreadAlertCount, nativeNotificationsEnabled, activeProject, addProject, requestVerification, sendMessage, approveRequest, rejectRequest, markAlertRead, markAllAlertsRead, setNativeNotificationsEnabled }), [projects, tasks, events, messages, approvals, budgetLimit, alerts, unreadAlertCount, nativeNotificationsEnabled, activeProject]);
   return <HubContext.Provider value={value}>{children}</HubContext.Provider>;
 }
 
@@ -393,4 +417,27 @@ export function getBudgetSummary(entries: CostEntry[], budgetLimit: number) {
   const remaining = Math.max(0, budgetLimit - spent);
   const percent = budgetLimit > 0 ? Math.min(100, Math.round((spent / budgetLimit) * 100)) : 0;
   return { spent, remaining, percent };
+}
+
+export function alertTone(severity: AlertSeverity) {
+  return severity === "budget" ? "warning" as const : "primary" as const;
+}
+
+export function buildHubAlerts(approvals: ApprovalRequest[], entries: CostEntry[], budgetLimit: number, readAlertIds: string[] = []): HubAlert[] {
+  const pendingApprovals = approvals.filter((approval) => approval.status === "قيد الانتظار").map((approval) => ({
+    id: `approval-${approval.id}`,
+    severity: "approval" as const,
+    title: `موافقة معلقة: ${approval.title}`,
+    description: `${approval.level} · ${approval.impact}`,
+    time: approval.createdAt,
+  }));
+  const budget = getBudgetSummary(entries, budgetLimit);
+  const budgetAlert = budget.percent >= 75 ? [{
+    id: "budget-threshold",
+    severity: "budget" as const,
+    title: `تنبيه الميزانية: ${budget.percent}% مستخدم`,
+    description: `تم استهلاك $${budget.spent.toFixed(2)} من سقف $${budgetLimit.toFixed(2)}. راجع التكاليف قبل بدء مهام إضافية.`,
+    time: "الآن",
+  }] : [];
+  return [...pendingApprovals, ...budgetAlert].map((alert) => ({ ...alert, read: readAlertIds.includes(alert.id) }));
 }

@@ -5,7 +5,6 @@ import { HapticTab } from "@/components/haptic-tab";
 import { IconSymbol } from "@/components/ui/icon-symbol";
 import { Platform } from "react-native";
 import { useColors } from "@/hooks/use-colors";
-import { HubProvider } from "@/lib/agent-hub";
 
 export default function TabLayout() {
   const colors = useColors();
@@ -14,7 +13,6 @@ export default function TabLayout() {
   const tabBarHeight = 56 + bottomPadding;
 
   return (
-    <HubProvider>
     <Tabs
       screenOptions={{
         tabBarActiveTintColor: colors.tint,
@@ -72,6 +70,5 @@ export default function TabLayout() {
         }}
       />
     </Tabs>
-    </HubProvider>
   );
 }

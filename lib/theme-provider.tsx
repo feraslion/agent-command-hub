@@ -1,5 +1,5 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
-import { Appearance, View, useColorScheme as useSystemColorScheme } from "react-native";
+import { View, useColorScheme as useSystemColorScheme } from "react-native";
 import { colorScheme as nativewindColorScheme, vars } from "nativewind";
 
 import { SchemeColors, type ColorScheme } from "@/constants/theme";
@@ -17,7 +17,6 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
 
   const applyScheme = useCallback((scheme: ColorScheme) => {
     nativewindColorScheme.set(scheme);
-    Appearance.setColorScheme?.(scheme);
     if (typeof document !== "undefined") {
       const root = document.documentElement;
       root.dataset.theme = scheme;
@@ -35,8 +34,11 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
   }, [applyScheme]);
 
   useEffect(() => {
-    applyScheme(colorScheme);
-  }, [applyScheme, colorScheme]);
+    // useSystemColorScheme subscribes to device / browser scheme changes.
+    // The provider follows it on startup and whenever the user switches system appearance.
+    setColorSchemeState(systemScheme);
+    applyScheme(systemScheme);
+  }, [applyScheme, systemScheme]);
 
   const themeVariables = useMemo(
     () =>

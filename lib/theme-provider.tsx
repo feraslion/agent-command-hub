@@ -44,6 +44,8 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
         "color-primary": SchemeColors[colorScheme].primary,
         "color-background": SchemeColors[colorScheme].background,
         "color-surface": SchemeColors[colorScheme].surface,
+        "color-elevated": SchemeColors[colorScheme].elevated,
+        "color-subtle": SchemeColors[colorScheme].subtle,
         "color-foreground": SchemeColors[colorScheme].foreground,
         "color-muted": SchemeColors[colorScheme].muted,
         "color-border": SchemeColors[colorScheme].border,
@@ -61,8 +63,6 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
     }),
     [colorScheme, setColorScheme],
   );
-  console.log(value, themeVariables)
-
   return (
     <ThemeContext.Provider value={value}>
       <View style={[{ flex: 1 }, themeVariables]}>{children}</View>

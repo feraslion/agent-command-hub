@@ -4,6 +4,7 @@ import { StatusPill } from "@/components/hub/status-pill";
 import { SectionTitle } from "@/components/hub/section-title";
 import { trpc } from "@/lib/trpc";
 import { useResponsiveLayout } from "@/components/hub/responsive";
+import { useColors } from "@/hooks/use-colors";
 
 const statusLabel = {
   planning: "قيد التخطيط",
@@ -23,6 +24,7 @@ const statusTone = {
 
 export default function ProjectsScreen() {
   const projectsQuery = trpc.projects.list.useQuery();
+  const colors = useColors();
   const { isWide, contentMaxWidth } = useResponsiveLayout();
   const utils = trpc.useUtils();
   const createMutation = trpc.projects.create.useMutation({
@@ -44,7 +46,7 @@ export default function ProjectsScreen() {
     : projectsQuery.error ? "تعذر تحميل المشاريع من الخادم. حاول مجدداً." : "";
 
   return (
-    <ScreenContainer className="px-5" containerClassName="bg-[#F7F7FC]">
+    <ScreenContainer className="px-5" containerClassName="bg-background">
       <FlatList
         key={isWide ? "projects-wide" : "projects-compact"}
         data={projects}
@@ -54,37 +56,37 @@ export default function ProjectsScreen() {
         columnWrapperStyle={isWide && projects.length > 0 ? styles.gridRow : undefined}
         ListHeaderComponent={
           <View>
-            <Text style={styles.eyebrow}>محفظة التنفيذ</Text>
-            <Text style={styles.heading}>المشاريع</Text>
-            <Text style={styles.subheading}>تُعرض هنا المشاريع المحفوظة في قاعدة البيانات وحالتها الفعلية.</Text>
+            <Text style={[styles.eyebrow, { color: colors.primary }]}>محفظة التنفيذ</Text>
+            <Text style={[styles.heading, { color: colors.foreground }]}>المشاريع</Text>
+            <Text style={[styles.subheading, { color: colors.muted }]}>تُعرض هنا المشاريع المحفوظة في قاعدة البيانات وحالتها الفعلية.</Text>
             <Pressable disabled={createMutation.isPending || Boolean(errorText)} onPress={createProject} style={({ pressed }) => [styles.createButton, (pressed || createMutation.isPending || Boolean(errorText)) && styles.pressed]}>
               <Text style={styles.createButtonText}>{createMutation.isPending ? "جارٍ الإنشاء…" : "إنشاء مشروع"}</Text>
               <Text style={styles.plus}>＋</Text>
             </Pressable>
-            {errorText ? <View style={styles.error}><Text style={styles.errorText}>{errorText}</Text></View> : null}
-            {createMutation.error ? <View style={styles.error}><Text style={styles.errorText}>تعذر إنشاء المشروع. تحقق من اتصالك ثم أعد المحاولة.</Text></View> : null}
+            {errorText ? <View style={[styles.error, { backgroundColor: "#4A202A", borderColor: "#6C2C3B" }]}><Text style={styles.errorText}>{errorText}</Text></View> : null}
+            {createMutation.error ? <View style={[styles.error, { backgroundColor: "#4A202A", borderColor: "#6C2C3B" }]}><Text style={styles.errorText}>تعذر إنشاء المشروع. تحقق من اتصالك ثم أعد المحاولة.</Text></View> : null}
             <SectionTitle title="كل المشاريع" caption={projectsQuery.isLoading ? "جارٍ التحميل من قاعدة البيانات…" : `${projects.length} مشاريع محفوظة`} />
           </View>
         }
-        renderItem={({ item }) => <ProjectCard project={item} wide={isWide} />}
+        renderItem={({ item }) => <ProjectCard project={item} wide={isWide} colors={colors} />}
         ItemSeparatorComponent={() => <View style={styles.separator} />}
-        ListEmptyComponent={!projectsQuery.isLoading && !errorText ? <View style={styles.empty}><Text style={styles.emptyTitle}>لا توجد مشاريع محفوظة بعد</Text><Text style={styles.emptyText}>أنشئ مشروعاً ليصبح نقطة البداية للمهام والأحداث والموافقات الفعلية.</Text></View> : null}
+        ListEmptyComponent={!projectsQuery.isLoading && !errorText ? <View style={[styles.empty, { backgroundColor: colors.surface, borderColor: colors.border }]}><Text style={[styles.emptyTitle, { color: colors.foreground }]}>لا توجد مشاريع محفوظة بعد</Text><Text style={[styles.emptyText, { color: colors.muted }]}>أنشئ مشروعاً ليصبح نقطة البداية للمهام والأحداث والموافقات الفعلية.</Text></View> : null}
       />
     </ScreenContainer>
   );
 }
 
-function ProjectCard({ project, wide }: { project: { id: number; name: string; code: string; status: keyof typeof statusLabel; progress: number; currentStage: string; updatedAt: Date }; wide: boolean }) {
+function ProjectCard({ project, wide, colors }: { project: { id: number; name: string; code: string; status: keyof typeof statusLabel; progress: number; currentStage: string; updatedAt: Date }; wide: boolean; colors: ReturnType<typeof useColors> }) {
   return (
-    <View style={[styles.card, wide && styles.cardWide]}>
+    <View style={[styles.card, wide && styles.cardWide, { backgroundColor: colors.surface, borderColor: colors.border }]}>
       <View style={styles.cardTop}>
-        <View style={styles.code}><Text style={styles.codeText}>{project.code}</Text></View>
+        <View style={[styles.code, { backgroundColor: colors.subtle }]}><Text style={[styles.codeText, { color: colors.primary }]}>{project.code}</Text></View>
         <StatusPill label={statusLabel[project.status]} tone={statusTone[project.status]} />
       </View>
-      <Text style={styles.projectTitle}>{project.name}</Text>
-      <Text style={styles.stage}>المرحلة الحالية · {project.currentStage}</Text>
-      <View style={styles.progressTrack}><View style={[styles.progressFill, { width: `${project.progress}%` }]} /></View>
-      <View style={styles.cardBottom}><Text style={styles.updated}>{formatUpdatedAt(project.updatedAt)}</Text><Text style={styles.progressLabel}>{project.progress}% مكتمل</Text></View>
+      <Text style={[styles.projectTitle, { color: colors.foreground }]}>{project.name}</Text>
+      <Text style={[styles.stage, { color: colors.muted }]}>المرحلة الحالية · {project.currentStage}</Text>
+      <View style={[styles.progressTrack, { backgroundColor: colors.subtle }]}><View style={[styles.progressFill, { width: `${project.progress}%`, backgroundColor: colors.primary }]} /></View>
+      <View style={styles.cardBottom}><Text style={[styles.updated, { color: colors.muted }]}>{formatUpdatedAt(project.updatedAt)}</Text><Text style={[styles.progressLabel, { color: colors.foreground }]}>{project.progress}% مكتمل</Text></View>
     </View>
   );
 }

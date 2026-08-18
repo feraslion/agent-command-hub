@@ -16,6 +16,7 @@ export default function TabLayout() {
     <Tabs
       screenOptions={{
         tabBarActiveTintColor: colors.tint,
+        tabBarInactiveTintColor: colors.muted,
         headerShown: false,
         tabBarButton: HapticTab,
         tabBarStyle: {
@@ -26,7 +27,7 @@ export default function TabLayout() {
           borderTopColor: colors.border,
           borderTopWidth: 1,
           elevation: 12,
-          shadowColor: "#111827",
+          shadowColor: colors.foreground,
           shadowOffset: { width: 0, height: -3 },
           shadowOpacity: 0.06,
           shadowRadius: 12,

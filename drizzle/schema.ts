@@ -19,6 +19,7 @@ export const approvalLevelValues = ["auto", "review", "approval"] as const;
 export const approvalStatusValues = ["pending", "approved", "rejected", "auto_resolved"] as const;
 export const executionCommandTypeValues = ["run_project", "run_task", "resume_task"] as const;
 export const executionCommandStatusValues = ["queued", "claimed", "completed", "failed", "cancelled"] as const;
+export const executionPlanStatusValues = ["ready", "blocked", "superseded"] as const;
 export const workerRuntimeStatusValues = ["disabled", "awaiting_service", "ready", "offline"] as const;
 
 export const projects = mysqlTable("projects", {
@@ -135,6 +136,22 @@ export const executionCommands = mysqlTable("execution_commands", {
 }, (table) => [
   index("execution_commands_project_created_idx").on(table.projectId, table.createdAt),
   index("execution_commands_status_created_idx").on(table.status, table.createdAt),
+]);
+
+export const executionPlans = mysqlTable("execution_plans", {
+  id: int("id").autoincrement().primaryKey(),
+  commandId: int("command_id").notNull().references(() => executionCommands.id, { onDelete: "cascade" }),
+  projectId: int("project_id").notNull().references(() => projects.id, { onDelete: "cascade" }),
+  taskId: int("task_id").references(() => tasks.id, { onDelete: "set null" }),
+  status: mysqlEnum("status", executionPlanStatusValues).default("ready").notNull(),
+  summary: varchar("summary", { length: 512 }).notNull(),
+  steps: text("steps").notNull(),
+  constraints: text("constraints").notNull(),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().onUpdateNow().notNull(),
+}, (table) => [
+  uniqueIndex("execution_plans_command_unique").on(table.commandId),
+  index("execution_plans_project_created_idx").on(table.projectId, table.createdAt),
 ]);
 
 export const workerSettings = mysqlTable("worker_settings", {

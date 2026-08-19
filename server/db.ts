@@ -1,4 +1,4 @@
-import { and, desc, eq, lt, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, lt, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/mysql2";
 import {
   agents,
@@ -6,6 +6,7 @@ import {
   costEntries,
   executionCommands,
   executionEvents,
+  executionPlans,
   projects,
   taskStatusValues,
   tasks,
@@ -185,6 +186,65 @@ export async function renewDryCommandLease(commandId: number, workerId: string) 
     eq(executionCommands.leaseOwner, workerId),
   ));
   return Number(result.affectedRows ?? 0) === 1;
+}
+
+export type DryRuntimePlanInput = {
+  summary: string;
+  steps: Array<{ order: number; agent: string; title: string; detail: string; approval: "auto" | "review" | "approval" }>;
+  constraints: string[];
+};
+
+export async function listClaimedCommandsForDryRuntime(workerId: string, ownerIds: number[], limit = 25) {
+  const db = await getDb();
+  if (!db || ownerIds.length === 0) return [];
+  return db.select({ command: executionCommands, ownerId: projects.ownerId }).from(executionCommands)
+    .innerJoin(projects, eq(executionCommands.projectId, projects.id))
+    .where(and(eq(executionCommands.status, "claimed"), eq(executionCommands.leaseOwner, workerId), inArray(projects.ownerId, ownerIds)))
+    .orderBy(executionCommands.leasedAt)
+    .limit(limit);
+}
+
+export async function createDryExecutionPlanForClaim(input: { ownerId: number; commandId: number; workerId: string; plan: DryRuntimePlanInput }) {
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+  const [claim] = await db.select({ command: executionCommands }).from(executionCommands)
+    .innerJoin(projects, eq(executionCommands.projectId, projects.id))
+    .where(and(
+      eq(executionCommands.id, input.commandId),
+      eq(executionCommands.status, "claimed"),
+      eq(executionCommands.leaseOwner, input.workerId),
+      eq(projects.ownerId, input.ownerId),
+    ))
+    .limit(1);
+  if (!claim) throw new Error("Claimed command not found for dry runtime");
+
+  const [existing] = await db.select().from(executionPlans).where(eq(executionPlans.commandId, input.commandId)).limit(1);
+  if (existing) return { plan: existing, created: false };
+
+  const command = claim.command;
+  const [result] = await db.insert(executionPlans).values({
+    commandId: command.id,
+    projectId: command.projectId,
+    taskId: command.taskId,
+    summary: input.plan.summary,
+    steps: JSON.stringify(input.plan.steps),
+    constraints: JSON.stringify(input.plan.constraints),
+  });
+  const planId = Number(result.insertId);
+  await db.update(projects).set({ currentStage: "runtime_planned" }).where(eq(projects.id, command.projectId));
+  await recordExecutionEvent(input.ownerId, command.projectId, {
+    taskId: command.taskId ?? undefined,
+    actor: input.workerId,
+    type: "DRY_RUNTIME_PLAN_CREATED",
+    label: "أنشأ Runtime الجاف خطة تنفيذ",
+    detail: `الخطة ${planId} للأمر ${command.command}: ${input.plan.summary}`,
+  });
+  return { plan: (await db.select().from(executionPlans).where(eq(executionPlans.id, planId)).limit(1))[0], created: true };
+}
+
+export async function listProjectExecutionPlans(userId: number, projectId: number, limit = 50) {
+  const { db } = await requireOwnedProject(userId, projectId);
+  return db.select().from(executionPlans).where(eq(executionPlans.projectId, projectId)).orderBy(desc(executionPlans.createdAt)).limit(limit);
 }
 
 export async function getProjectForOwner(userId: number, projectId: number) {

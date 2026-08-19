@@ -93,6 +93,9 @@ export default function ProjectsScreen() {
 }
 
 function ProjectCard({ project, wide, colors, onRun, isSubmitting }: { project: { id: number; name: string; code: string; status: keyof typeof statusLabel; progress: number; currentStage: string; updatedAt: Date }; wide: boolean; colors: ReturnType<typeof useColors>; onRun: () => void; isSubmitting: boolean }) {
+  const plansQuery = trpc.runtime.listPlans.useQuery({ projectId: project.id, limit: 1 }, { refetchInterval: 10_000 });
+  const latestPlan = plansQuery.data?.[0];
+  const stepCount = latestPlan ? readPlanStepCount(latestPlan.steps) : 0;
   return (
     <View style={[styles.card, wide && styles.cardWide, { backgroundColor: colors.surface, borderColor: colors.border }]}>
       <View style={styles.cardTop}>
@@ -103,6 +106,7 @@ function ProjectCard({ project, wide, colors, onRun, isSubmitting }: { project: 
       <Text style={[styles.stage, { color: colors.muted }]}>المرحلة الحالية · {project.currentStage}</Text>
       <View style={[styles.progressTrack, { backgroundColor: colors.subtle }]}><View style={[styles.progressFill, { width: `${project.progress}%`, backgroundColor: colors.primary }]} /></View>
       <View style={styles.cardBottom}><Text style={[styles.updated, { color: colors.muted }]}>{formatUpdatedAt(project.updatedAt)}</Text><Text style={[styles.progressLabel, { color: colors.foreground }]}>{project.progress}% مكتمل</Text></View>
+      <View style={[styles.runtimeCard, { backgroundColor: colors.subtle, borderColor: colors.border }]}><Text style={[styles.runtimeValue, { color: colors.primary }]}>{latestPlan ? `${stepCount} خطوات · ${runtimePlanStatusLabel(latestPlan.status)}` : "بانتظار أمر محجوز"}</Text><Text style={[styles.runtimeLabel, { color: colors.muted }]}>Runtime الجاف</Text></View>
       <Pressable disabled={isSubmitting} onPress={onRun} style={({ pressed }) => [styles.runButton, { backgroundColor: colors.primary }, (pressed || isSubmitting) && styles.pressed]}><Text style={styles.runButtonText}>{isSubmitting ? "جارٍ إرسال الأمر…" : "إرسال إلى العامل"}</Text><Text style={styles.runArrow}>←</Text></Pressable>
     </View>
   );
@@ -111,6 +115,19 @@ function ProjectCard({ project, wide, colors, onRun, isSubmitting }: { project: 
 function formatUpdatedAt(value: Date) {
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? "غير معروف" : `آخر تحديث ${date.toLocaleDateString("ar")}`;
+}
+
+function readPlanStepCount(serializedSteps: string) {
+  try {
+    const value = JSON.parse(serializedSteps);
+    return Array.isArray(value) ? value.length : 0;
+  } catch {
+    return 0;
+  }
+}
+
+function runtimePlanStatusLabel(status: "ready" | "blocked" | "superseded") {
+  return status === "ready" ? "خطة جاهزة" : status === "blocked" ? "تحتاج مراجعة" : "تم استبدالها";
 }
 
 const styles = StyleSheet.create({
@@ -138,6 +155,9 @@ const styles = StyleSheet.create({
   cardBottom: { flexDirection: "row-reverse", justifyContent: "space-between", marginTop: 10 },
   updated: { color: "#8A90A3", fontSize: 12 },
   progressLabel: { color: "#3D4052", fontSize: 12, fontWeight: "700" },
+  runtimeCard: { borderRadius: 12, borderWidth: 1, flexDirection: "row-reverse", justifyContent: "space-between", marginTop: 14, paddingHorizontal: 11, paddingVertical: 10 },
+  runtimeLabel: { fontSize: 11, fontWeight: "800" },
+  runtimeValue: { fontSize: 11, fontWeight: "900" },
   runButton: { alignItems: "center", borderRadius: 13, flexDirection: "row-reverse", justifyContent: "space-between", marginTop: 15, minHeight: 44, paddingHorizontal: 14 },
   runButtonText: { color: "#FFFFFF", fontSize: 13, fontWeight: "900" },
   runArrow: { color: "#FFFFFF", fontSize: 17 },

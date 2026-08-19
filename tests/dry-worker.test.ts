@@ -9,13 +9,15 @@ describe("حلقة العامل الجاف", () => {
       touchWorkerHeartbeat: vi.fn().mockResolvedValue(undefined),
       claimNextDryCommand: vi.fn().mockResolvedValueOnce({ id: 101 }).mockResolvedValueOnce(undefined),
     };
+    const runRuntime = vi.fn().mockResolvedValue({ createdPlanCount: 1, observedClaimCount: 1 });
 
-    const result = await runDryWorkerTick("dry-worker-test", operations);
+    const result = await runDryWorkerTick("dry-worker-test", operations, runRuntime);
 
     expect(operations.reclaimExpiredCommandLeases).toHaveBeenCalledOnce();
     expect(operations.touchWorkerHeartbeat).toHaveBeenCalledTimes(2);
     expect(operations.claimNextDryCommand).toHaveBeenNthCalledWith(1, 11, "dry-worker-test");
     expect(operations.claimNextDryCommand).toHaveBeenNthCalledWith(2, 22, "dry-worker-test");
-    expect(result).toMatchObject({ enabledOwnerCount: 2, claimedCommandCount: 1, recoveredLeaseCount: 2, failedLeaseCount: 1 });
+    expect(runRuntime).toHaveBeenCalledWith("dry-worker-test", [11, 22]);
+    expect(result).toMatchObject({ enabledOwnerCount: 2, claimedCommandCount: 1, recoveredLeaseCount: 2, failedLeaseCount: 1, createdPlanCount: 1 });
   });
 });

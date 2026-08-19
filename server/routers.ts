@@ -96,6 +96,9 @@ export const appRouter = router({
       payload: z.string().trim().max(12000).optional(),
     })).mutation(({ ctx, input }) => db.enqueueExecutionCommand(ctx.user.id, input)),
   }),
+  runtime: router({
+    listPlans: protectedProcedure.input(projectIdInput.extend({ limit: z.number().int().min(1).max(100).optional() })).query(({ ctx, input }) => db.listProjectExecutionPlans(ctx.user.id, input.projectId, input.limit ?? 50)),
+  }),
   events: router({
     list: protectedProcedure.input(projectIdInput.extend({ limit: z.number().int().min(1).max(200).optional() })).query(({ ctx, input }) => db.listProjectEvents(ctx.user.id, input.projectId, input.limit ?? 50)),
   }),

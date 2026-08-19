@@ -1,15 +1,18 @@
 import * as workerDb from "./db";
+import { runDryRuntimeTick } from "./dry-runtime";
 
 export const DRY_WORKER_INTERVAL_MS = 10_000;
 export const DRY_WORKER_LEASE_TIMEOUT_MS = 45_000;
 
 type DryWorkerOperations = Pick<typeof workerDb, "claimNextDryCommand" | "listEnabledWorkerOwners" | "reclaimExpiredCommandLeases" | "touchWorkerHeartbeat">;
+type DryRuntimeRunner = (workerId: string, ownerIds: number[]) => Promise<{ createdPlanCount: number; observedClaimCount: number }>;
 
 export type DryWorkerTickResult = {
   claimedCommandCount: number;
   enabledOwnerCount: number;
   recoveredLeaseCount: number;
   failedLeaseCount: number;
+  createdPlanCount: number;
   ranAt: Date;
 };
 
@@ -22,10 +25,11 @@ export function getDryWorkerLoopStatus() {
     leaseTimeoutMs: DRY_WORKER_LEASE_TIMEOUT_MS,
     lastTickAt: lastDryWorkerTick?.ranAt ?? null,
     lastClaimedCommandCount: lastDryWorkerTick?.claimedCommandCount ?? 0,
+    lastCreatedPlanCount: lastDryWorkerTick?.createdPlanCount ?? 0,
   };
 }
 
-export async function runDryWorkerTick(workerId: string, operations: DryWorkerOperations = workerDb): Promise<DryWorkerTickResult> {
+export async function runDryWorkerTick(workerId: string, operations: DryWorkerOperations = workerDb, runRuntime: DryRuntimeRunner = runDryRuntimeTick): Promise<DryWorkerTickResult> {
   const recovered = await operations.reclaimExpiredCommandLeases(DRY_WORKER_LEASE_TIMEOUT_MS);
   const enabledOwners = await operations.listEnabledWorkerOwners();
   let claimedCommandCount = 0;
@@ -35,12 +39,14 @@ export async function runDryWorkerTick(workerId: string, operations: DryWorkerOp
     const claimed = await operations.claimNextDryCommand(ownerId, workerId);
     if (claimed) claimedCommandCount += 1;
   }
+  const runtime = await runRuntime(workerId, enabledOwners.map(({ ownerId }) => ownerId));
 
   const result = {
     claimedCommandCount,
     enabledOwnerCount: enabledOwners.length,
     recoveredLeaseCount: recovered.requeued,
     failedLeaseCount: recovered.failed,
+    createdPlanCount: runtime.createdPlanCount,
     ranAt: new Date(),
   };
   lastDryWorkerTick = result;

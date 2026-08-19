@@ -118,6 +118,11 @@ export const appRouter = router({
     check: protectedProcedure.input(projectIdInput.extend({ kind: z.enum(["workspace_policy", "logical_test"]), engineRunId: z.number().int().positive().optional() })).mutation(({ ctx, input }) => db.runLogicalSandboxCheckForProject(ctx.user.id, input)),
     requestGate: protectedProcedure.input(projectIdInput.extend({ kind: z.enum(["git_gate", "publish_gate", "delete_gate"]) })).mutation(({ ctx, input }) => db.requestSandboxGateForProject(ctx.user.id, input)),
   }),
+  isolatedRuntime: router({
+    status: protectedProcedure.query(() => db.isolatedRuntimeEnvironment),
+    listRequests: protectedProcedure.input(projectIdInput.extend({ limit: z.number().int().min(1).max(100).optional() })).query(({ ctx, input }) => db.listIsolatedRuntimeRequestsForProject(ctx.user.id, input.projectId, input.limit ?? 50)),
+    requestExecution: protectedProcedure.input(projectIdInput.extend({ targetPath: z.string().trim().min(1).max(512), engineRunId: z.number().int().positive().optional() })).mutation(({ ctx, input }) => db.requestIsolatedRuntimeExecution(ctx.user.id, input)),
+  }),
   events: router({
     list: protectedProcedure.input(projectIdInput.extend({ limit: z.number().int().min(1).max(200).optional() })).query(({ ctx, input }) => db.listProjectEvents(ctx.user.id, input.projectId, input.limit ?? 50)),
   }),

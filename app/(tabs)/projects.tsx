@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { FlatList, Pressable, StyleSheet, Text, View } from "react-native";
+import { useRouter } from "expo-router";
 import { ScreenContainer } from "@/components/screen-container";
 import { StatusPill } from "@/components/hub/status-pill";
 import { SectionTitle } from "@/components/hub/section-title";
@@ -24,6 +25,7 @@ const statusTone = {
 } as const;
 
 export default function ProjectsScreen() {
+  const router = useRouter();
   const projectsQuery = trpc.projects.list.useQuery();
   const colors = useColors();
   const { isWide, contentMaxWidth } = useResponsiveLayout();
@@ -84,7 +86,7 @@ export default function ProjectsScreen() {
             <SectionTitle title="كل المشاريع" caption={projectsQuery.isLoading ? "جارٍ التحميل من قاعدة البيانات…" : `${projects.length} مشاريع محفوظة`} />
           </View>
         }
-        renderItem={({ item }) => <ProjectCard project={item} wide={isWide} colors={colors} onRun={() => enqueueProjectRun(item.id)} isSubmitting={commandMutation.isPending} />}
+        renderItem={({ item }) => <ProjectCard project={item} wide={isWide} colors={colors} onRun={() => enqueueProjectRun(item.id)} onWorkspace={() => router.push({ pathname: "/workspace", params: { projectId: String(item.id), projectName: item.name } })} isSubmitting={commandMutation.isPending} />}
         ItemSeparatorComponent={() => <View style={styles.separator} />}
         ListEmptyComponent={!projectsQuery.isLoading && !errorText ? <View style={[styles.empty, { backgroundColor: colors.surface, borderColor: colors.border }]}><Text style={[styles.emptyTitle, { color: colors.foreground }]}>لا توجد مشاريع محفوظة بعد</Text><Text style={[styles.emptyText, { color: colors.muted }]}>أنشئ مشروعاً ليصبح نقطة البداية للمهام والأحداث والموافقات الفعلية.</Text></View> : null}
       />
@@ -92,7 +94,7 @@ export default function ProjectsScreen() {
   );
 }
 
-function ProjectCard({ project, wide, colors, onRun, isSubmitting }: { project: { id: number; name: string; code: string; status: keyof typeof statusLabel; progress: number; currentStage: string; updatedAt: Date }; wide: boolean; colors: ReturnType<typeof useColors>; onRun: () => void; isSubmitting: boolean }) {
+function ProjectCard({ project, wide, colors, onRun, onWorkspace, isSubmitting }: { project: { id: number; name: string; code: string; status: keyof typeof statusLabel; progress: number; currentStage: string; updatedAt: Date }; wide: boolean; colors: ReturnType<typeof useColors>; onRun: () => void; onWorkspace: () => void; isSubmitting: boolean }) {
   const plansQuery = trpc.runtime.listPlans.useQuery({ projectId: project.id, limit: 1 }, { refetchInterval: 10_000 });
   const engineQuery = trpc.engine.listRuns.useQuery({ projectId: project.id, limit: 1 }, { refetchInterval: 10_000 });
   const sandboxQuery = trpc.sandbox.list.useQuery({ projectId: project.id, limit: 1 }, { refetchInterval: 10_000 });
@@ -119,6 +121,7 @@ function ProjectCard({ project, wide, colors, onRun, isSubmitting }: { project: 
       {latestEngineRun && !["completed", "failed", "blocked"].includes(latestEngineRun.status) ? <Pressable disabled={engineAdvance.isPending} onPress={() => engineAdvance.mutate({ projectId: project.id, runId: latestEngineRun.id })} style={({ pressed }) => [styles.engineButton, { borderColor: colors.border }, (pressed || engineAdvance.isPending) && styles.pressed]}><Text style={[styles.engineButtonText, { color: colors.primary }]}>{engineAdvance.isPending ? "جارٍ تحديث المحرك…" : "تحديث خطوة المحرك"}</Text></Pressable> : null}
       <View style={[styles.runtimeCard, { backgroundColor: colors.subtle, borderColor: colors.border }]}><Text style={[styles.runtimeValue, { color: colors.primary }]}>{latestSandboxCheck ? sandboxStatusLabel(latestSandboxCheck.status) : "لم يُشغّل بعد"}</Text><Text style={[styles.runtimeLabel, { color: colors.muted }]}>Sandbox المنطقية</Text></View>
       <View style={styles.sandboxActions}><Pressable disabled={sandboxCheck.isPending} onPress={() => sandboxCheck.mutate({ projectId: project.id, kind: "logical_test", engineRunId: latestEngineRun?.id })} style={({ pressed }) => [styles.sandboxAction, { borderColor: colors.border }, (pressed || sandboxCheck.isPending) && styles.pressed]}><Text style={[styles.engineButtonText, { color: colors.primary }]}>{sandboxCheck.isPending ? "جارٍ الفحص…" : "فحص منطقي"}</Text></Pressable><Pressable disabled={sandboxGate.isPending} onPress={() => sandboxGate.mutate({ projectId: project.id, kind: "publish_gate" })} style={({ pressed }) => [styles.sandboxAction, { borderColor: colors.border }, (pressed || sandboxGate.isPending) && styles.pressed]}><Text style={[styles.engineButtonText, { color: colors.primary }]}>{sandboxGate.isPending ? "جارٍ الطلب…" : "بوابة نشر"}</Text></Pressable></View>
+      <Pressable onPress={onWorkspace} style={({ pressed }) => [styles.workspaceButton, { borderColor: colors.border }, pressed && styles.pressed]}><Text style={[styles.engineButtonText, { color: colors.primary }]}>مستعرض Workspace</Text></Pressable>
       <Pressable disabled={isSubmitting} onPress={onRun} style={({ pressed }) => [styles.runButton, { backgroundColor: colors.primary }, (pressed || isSubmitting) && styles.pressed]}><Text style={styles.runButtonText}>{isSubmitting ? "جارٍ إرسال الأمر…" : "إرسال إلى العامل"}</Text><Text style={styles.runArrow}>←</Text></Pressable>
     </View>
   );
@@ -190,6 +193,7 @@ const styles = StyleSheet.create({
   engineButtonText: { fontSize: 12, fontWeight: "900" },
   sandboxActions: { flexDirection: "row-reverse", gap: 8, marginTop: 9 },
   sandboxAction: { alignItems: "center", borderRadius: 11, borderWidth: 1, flex: 1, paddingVertical: 9 },
+  workspaceButton: { alignItems: "center", borderRadius: 11, borderWidth: 1, marginTop: 9, paddingVertical: 9 },
   runButton: { alignItems: "center", borderRadius: 13, flexDirection: "row-reverse", justifyContent: "space-between", marginTop: 15, minHeight: 44, paddingHorizontal: 14 },
   runButtonText: { color: "#FFFFFF", fontSize: 13, fontWeight: "900" },
   runArrow: { color: "#FFFFFF", fontSize: 17 },

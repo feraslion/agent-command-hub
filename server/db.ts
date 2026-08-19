@@ -7,6 +7,7 @@ import {
   executionCommands,
   executionEvents,
   executionPlans,
+  isolatedRuntimeRequests,
   projects,
   sandboxChecks,
   taskStatusValues,
@@ -239,6 +240,40 @@ export async function requestSandboxGateForProject(userId: number, input: { proj
   });
   await recordWorkspaceAudit(workspace.id, { actor: "Logical Sandbox", action: "gate_requested", detail });
   return (await db.select().from(sandboxChecks).where(eq(sandboxChecks.id, Number(result.insertId))).limit(1))[0];
+}
+
+export const isolatedRuntimeEnvironment = {
+  status: "environment_required" as const,
+  canExecuteUserCode: false,
+  label: "بيئة نظام تشغيل معزولة غير مهيأة",
+  detail: "لا تسمح الاستضافة الحالية بتشغيل شيفرة المستخدم أو Docker من التطبيق. يبقى الطلب مسجلاً ومحجوباً حتى ربط عامل ببيئة معزولة معتمدة.",
+};
+
+export async function listIsolatedRuntimeRequestsForProject(userId: number, projectId: number, limit = 50) {
+  const { db } = await requireOwnedProject(userId, projectId);
+  return db.select().from(isolatedRuntimeRequests).where(eq(isolatedRuntimeRequests.projectId, projectId)).orderBy(desc(isolatedRuntimeRequests.createdAt)).limit(limit);
+}
+
+export async function requestIsolatedRuntimeExecution(userId: number, input: { projectId: number; targetPath: string; engineRunId?: number }) {
+  const ensured = await ensureWorkspaceForProject(userId, input.projectId);
+  const workspace = ensured.workspace;
+  const path = normalizeWorkspacePath(input.targetPath);
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+  const [file] = await db.select({ id: workspaceFiles.id }).from(workspaceFiles).where(and(eq(workspaceFiles.workspaceId, workspace.id), eq(workspaceFiles.path, path))).limit(1);
+  if (!file) throw new Error("Workspace file not found");
+  const [result] = await db.insert(isolatedRuntimeRequests).values({
+    projectId: input.projectId,
+    workspaceId: workspace.id,
+    engineRunId: input.engineRunId ?? null,
+    requestedByUserId: userId,
+    targetPath: path,
+    status: "environment_required",
+    reason: isolatedRuntimeEnvironment.detail,
+  });
+  await recordWorkspaceAudit(workspace.id, { actor: "Isolated Runtime Gate", action: "tool_rejected", path, detail: "تم تسجيل طلب تنفيذ شيفرة، لكنه محجوب إلى أن تتوفر بيئة نظام تشغيل معزولة معتمدة." });
+  await recordExecutionEvent(userId, input.projectId, { actor: "Isolated Runtime Gate", type: "ISOLATED_RUNTIME_BLOCKED", label: "حُجب تنفيذ الشيفرة بانتظار البيئة المعزولة", detail: path });
+  return (await db.select().from(isolatedRuntimeRequests).where(eq(isolatedRuntimeRequests.id, Number(result.insertId))).limit(1))[0];
 }
 
 export async function getWorkerSettingsForOwner(userId: number) {

@@ -95,4 +95,20 @@ describe("platform API security", () => {
 
     await expect(caller.approvals.resolve({ projectId: 1, approvalId: 1, decision: "continue" as never })).rejects.toMatchObject({ code: "BAD_REQUEST" });
   });
+
+  it("يرفض طلب Runtime المعزولة بمعرّف مشروع غير صالح قبل الوصول لقاعدة البيانات", async () => {
+    const caller = appRouter.createCaller(contextWithUser({
+      id: 1,
+      openId: "owner",
+      email: "owner@example.com",
+      name: "Owner",
+      loginMethod: "manus",
+      role: "admin",
+      createdAt: new Date(),
+      updatedAt: new Date(),
+      lastSignedIn: new Date(),
+    }));
+
+    await expect(caller.isolatedRuntime.requestExecution({ projectId: 0, targetPath: "source/main.ts" })).rejects.toMatchObject({ code: "BAD_REQUEST" });
+  });
 });

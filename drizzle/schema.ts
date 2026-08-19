@@ -27,6 +27,7 @@ export const taskEngineRunStatusValues = ["queued", "running", "awaiting_review"
 export const taskEngineStepStatusValues = ["pending", "running", "awaiting_review", "awaiting_approval", "completed", "failed", "skipped"] as const;
 export const sandboxCheckKindValues = ["workspace_policy", "logical_test", "git_gate", "publish_gate", "delete_gate"] as const;
 export const sandboxCheckStatusValues = ["passed", "blocked", "awaiting_approval", "rejected"] as const;
+export const isolatedRuntimeRequestStatusValues = ["environment_required", "blocked", "approved", "submitted", "completed", "failed"] as const;
 
 export const projects = mysqlTable("projects", {
   id: int("id").autoincrement().primaryKey(),
@@ -245,6 +246,22 @@ export const sandboxChecks = mysqlTable("sandbox_checks", {
   createdAt: timestamp("created_at").defaultNow().notNull(),
 }, (table) => [
   index("sandbox_checks_project_created_idx").on(table.projectId, table.createdAt),
+]);
+
+export const isolatedRuntimeRequests = mysqlTable("isolated_runtime_requests", {
+  id: int("id").autoincrement().primaryKey(),
+  projectId: int("project_id").notNull().references(() => projects.id, { onDelete: "cascade" }),
+  workspaceId: int("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+  engineRunId: int("engine_run_id").references(() => taskEngineRuns.id, { onDelete: "set null" }),
+  requestedByUserId: int("requested_by_user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+  targetPath: varchar("target_path", { length: 512 }).notNull(),
+  status: mysqlEnum("status", isolatedRuntimeRequestStatusValues).default("environment_required").notNull(),
+  reason: text("reason").notNull(),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().onUpdateNow().notNull(),
+}, (table) => [
+  index("isolated_runtime_requests_project_created_idx").on(table.projectId, table.createdAt),
+  index("isolated_runtime_requests_workspace_created_idx").on(table.workspaceId, table.createdAt),
 ]);
 
 export const workerSettings = mysqlTable("worker_settings", {

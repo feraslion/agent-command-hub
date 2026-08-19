@@ -150,3 +150,8 @@
 - [x] فحص عقود الوكيل وحدود Workspace وRuntime وTask Engine وSandbox.
 - [x] صياغة System Prompt مخصص لتشغيل الوكيل داخل Agent Command Hub.
 - [x] مراجعة System Prompt وتوثيقه كملف قابل للاستخدام.
+- [x] مراجعة System Prompt الرئيسي وتحديد حدود Planner وCoder وQA.
+- [x] إنشاء قالب System Prompt مستقل لدور Planner.
+- [x] إنشاء قالب System Prompt مستقل لدور Coder.
+- [x] إنشاء قالب System Prompt مستقل لدور QA.
+- [x] مراجعة اتساق القوالب وحفظها كنسخة قابلة للاسترجاع.

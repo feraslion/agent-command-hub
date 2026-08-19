@@ -273,6 +273,7 @@ export const sensitiveWorkspaceChanges = mysqlTable("sensitive_workspace_changes
   requestedByUserId: int("requested_by_user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
   path: varchar("path", { length: 512 }).notNull(),
   baseVersion: int("base_version").notNull(),
+  previousContent: text("previous_content"),
   proposedContent: text("proposed_content").notNull(),
   riskSummary: text("risk_summary").notNull(),
   status: mysqlEnum("status", sensitiveWorkspaceChangeStatusValues).default("pending_secondary").notNull(),

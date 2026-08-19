@@ -1,0 +1,1 @@
+ALTER TABLE `sensitive_workspace_changes` ADD `previous_content` text;

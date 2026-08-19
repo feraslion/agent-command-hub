@@ -197,6 +197,11 @@ export async function listSensitiveWorkspaceChangesForProject(userId: number, pr
   return db.select().from(sensitiveWorkspaceChanges).where(eq(sensitiveWorkspaceChanges.projectId, projectId)).orderBy(desc(sensitiveWorkspaceChanges.createdAt)).limit(limit);
 }
 
+export async function listAppliedSensitiveWorkspaceChangesForProject(userId: number, projectId: number, limit = 50) {
+  const { db } = await requireOwnedProject(userId, projectId);
+  return db.select().from(sensitiveWorkspaceChanges).where(and(eq(sensitiveWorkspaceChanges.projectId, projectId), eq(sensitiveWorkspaceChanges.status, "applied"))).orderBy(desc(sensitiveWorkspaceChanges.appliedAt)).limit(limit);
+}
+
 export async function submitSensitiveWorkspaceChange(userId: number, input: { projectId: number; path: string; content: string }) {
   const ensured = await ensureWorkspaceForProject(userId, input.projectId);
   const workspace = ensured.workspace;
@@ -224,6 +229,7 @@ export async function submitSensitiveWorkspaceChange(userId: number, input: { pr
     requestedByUserId: userId,
     path,
     baseVersion: currentFile.version,
+    previousContent: currentFile.content,
     proposedContent,
     riskSummary,
   });

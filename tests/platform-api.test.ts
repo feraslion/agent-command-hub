@@ -127,4 +127,20 @@ describe("platform API security", () => {
 
     await expect(caller.sensitiveChanges.submit({ projectId: 0, path: "source/runner.ts", content: "process.env.API_TOKEN" })).rejects.toMatchObject({ code: "BAD_REQUEST" });
   });
+
+  it("يرفض قراءة سجل الفروقات المعتمدة بمعرّف مشروع غير صالح قبل الوصول لقاعدة البيانات", async () => {
+    const caller = appRouter.createCaller(contextWithUser({
+      id: 1,
+      openId: "owner",
+      email: "owner@example.com",
+      name: "Owner",
+      loginMethod: "manus",
+      role: "admin",
+      createdAt: new Date(),
+      updatedAt: new Date(),
+      lastSignedIn: new Date(),
+    }));
+
+    await expect(caller.sensitiveChanges.listApplied({ projectId: 0 })).rejects.toMatchObject({ code: "BAD_REQUEST" });
+  });
 });

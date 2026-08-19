@@ -39,6 +39,7 @@ export const appRouter = router({
   }),
   sensitiveChanges: router({
     list: protectedProcedure.input(projectIdInput.extend({ limit: z.number().int().min(1).max(100).optional() })).query(({ ctx, input }) => db.listSensitiveWorkspaceChangesForProject(ctx.user.id, input.projectId, input.limit ?? 50)),
+    listApplied: protectedProcedure.input(projectIdInput.extend({ limit: z.number().int().min(1).max(100).optional() })).query(({ ctx, input }) => db.listAppliedSensitiveWorkspaceChangesForProject(ctx.user.id, input.projectId, input.limit ?? 50)),
     submit: protectedProcedure.input(projectIdInput.extend({ path: z.string().trim().min(1).max(512), content: z.string().min(1).max(64_000) })).mutation(({ ctx, input }) => db.submitSensitiveWorkspaceChange(ctx.user.id, input)),
   }),
   tasks: router({

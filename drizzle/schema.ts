@@ -28,6 +28,7 @@ export const taskEngineStepStatusValues = ["pending", "running", "awaiting_revie
 export const sandboxCheckKindValues = ["workspace_policy", "logical_test", "git_gate", "publish_gate", "delete_gate"] as const;
 export const sandboxCheckStatusValues = ["passed", "blocked", "awaiting_approval", "rejected"] as const;
 export const isolatedRuntimeRequestStatusValues = ["environment_required", "blocked", "approved", "submitted", "completed", "failed"] as const;
+export const sensitiveWorkspaceChangeStatusValues = ["pending_secondary", "applied", "rejected", "conflicted"] as const;
 
 export const projects = mysqlTable("projects", {
   id: int("id").autoincrement().primaryKey(),
@@ -262,6 +263,26 @@ export const isolatedRuntimeRequests = mysqlTable("isolated_runtime_requests", {
 }, (table) => [
   index("isolated_runtime_requests_project_created_idx").on(table.projectId, table.createdAt),
   index("isolated_runtime_requests_workspace_created_idx").on(table.workspaceId, table.createdAt),
+]);
+
+export const sensitiveWorkspaceChanges = mysqlTable("sensitive_workspace_changes", {
+  id: int("id").autoincrement().primaryKey(),
+  projectId: int("project_id").notNull().references(() => projects.id, { onDelete: "cascade" }),
+  workspaceId: int("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+  approvalId: int("approval_id").notNull().references(() => approvals.id, { onDelete: "cascade" }),
+  requestedByUserId: int("requested_by_user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+  path: varchar("path", { length: 512 }).notNull(),
+  baseVersion: int("base_version").notNull(),
+  proposedContent: text("proposed_content").notNull(),
+  riskSummary: text("risk_summary").notNull(),
+  status: mysqlEnum("status", sensitiveWorkspaceChangeStatusValues).default("pending_secondary").notNull(),
+  appliedAt: timestamp("applied_at"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().onUpdateNow().notNull(),
+}, (table) => [
+  uniqueIndex("sensitive_workspace_changes_approval_unique").on(table.approvalId),
+  index("sensitive_workspace_changes_project_created_idx").on(table.projectId, table.createdAt),
+  index("sensitive_workspace_changes_workspace_path_idx").on(table.workspaceId, table.path),
 ]);
 
 export const workerSettings = mysqlTable("worker_settings", {

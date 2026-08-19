@@ -37,6 +37,10 @@ export const appRouter = router({
     readFile: protectedProcedure.input(projectIdInput.extend({ path: z.string().trim().min(1).max(512) })).query(({ ctx, input }) => db.readWorkspaceFileForProject(ctx.user.id, input)),
     writeFile: protectedProcedure.input(projectIdInput.extend({ path: z.string().trim().min(1).max(512), content: z.string().max(64_000) })).mutation(({ ctx, input }) => db.writeWorkspaceFileForProject(ctx.user.id, input)),
   }),
+  sensitiveChanges: router({
+    list: protectedProcedure.input(projectIdInput.extend({ limit: z.number().int().min(1).max(100).optional() })).query(({ ctx, input }) => db.listSensitiveWorkspaceChangesForProject(ctx.user.id, input.projectId, input.limit ?? 50)),
+    submit: protectedProcedure.input(projectIdInput.extend({ path: z.string().trim().min(1).max(512), content: z.string().min(1).max(64_000) })).mutation(({ ctx, input }) => db.submitSensitiveWorkspaceChange(ctx.user.id, input)),
+  }),
   tasks: router({
     list: protectedProcedure.input(projectIdInput).query(({ ctx, input }) => db.listProjectTasks(ctx.user.id, input.projectId)),
     create: protectedProcedure.input(z.object({

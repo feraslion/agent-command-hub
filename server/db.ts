@@ -10,6 +10,7 @@ import {
   isolatedRuntimeRequests,
   projects,
   sandboxChecks,
+  sensitiveWorkspaceChanges,
   taskStatusValues,
   taskEngineRuns,
   taskEngineSteps,
@@ -24,6 +25,7 @@ import {
 } from "../drizzle/schema";
 import { ENV } from "./_core/env";
 import { sandboxGateDetail, sandboxGateKinds, sandboxGateTitle } from "./sandbox-policy";
+import { assessSensitiveWorkspaceChange } from "../lib/sensitive-workspace-policy";
 import { assertWorkspaceContent, normalizeWorkspacePath, WorkspacePathError } from "./workspace-policy";
 
 let _db: ReturnType<typeof drizzle> | null = null;
@@ -188,6 +190,75 @@ export async function writeWorkspaceFileForProject(userId: number, input: { proj
     }
     throw error;
   }
+}
+
+export async function listSensitiveWorkspaceChangesForProject(userId: number, projectId: number, limit = 50) {
+  const { db } = await requireOwnedProject(userId, projectId);
+  return db.select().from(sensitiveWorkspaceChanges).where(eq(sensitiveWorkspaceChanges.projectId, projectId)).orderBy(desc(sensitiveWorkspaceChanges.createdAt)).limit(limit);
+}
+
+export async function submitSensitiveWorkspaceChange(userId: number, input: { projectId: number; path: string; content: string }) {
+  const ensured = await ensureWorkspaceForProject(userId, input.projectId);
+  const workspace = ensured.workspace;
+  const path = normalizeWorkspacePath(input.path);
+  const proposedContent = assertWorkspaceContent(input.content);
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+  const [currentFile] = await db.select().from(workspaceFiles).where(and(eq(workspaceFiles.workspaceId, workspace.id), eq(workspaceFiles.path, path))).limit(1);
+  if (!currentFile) throw new Error("Workspace file not found");
+  const assessment = assessSensitiveWorkspaceChange(path, currentFile.content, proposedContent);
+  if (!assessment.sensitive) throw new Error("Change does not require secondary review");
+  const riskSummary = assessment.reasons.join("؛ ");
+  const approval = await createApprovalRequest(userId, {
+    projectId: input.projectId,
+    requestedBy: "Workspace Editor",
+    title: `مراجعة ثانوية لتعديل ${path}`,
+    detail: `اقتراح تعديل حساس محفوظ للمراجعة قبل الكتابة. الإشارات: ${riskSummary}.`,
+    impact: "سيكتب التعديل إلى ملف Workspace فقط بعد اعتماد المراجعة الثانوية والتحقق من الإصدار.",
+    level: "approval",
+  });
+  const [result] = await db.insert(sensitiveWorkspaceChanges).values({
+    projectId: input.projectId,
+    workspaceId: workspace.id,
+    approvalId: approval.id,
+    requestedByUserId: userId,
+    path,
+    baseVersion: currentFile.version,
+    proposedContent,
+    riskSummary,
+  });
+  await recordWorkspaceAudit(workspace.id, { actor: "Workspace Editor", action: "gate_requested", path, detail: "حُفظ اقتراح تعديل حساس للمراجعة الثانوية؛ لم يتغير الملف الحالي." });
+  await recordExecutionEvent(userId, input.projectId, { actor: "Workspace Editor", type: "SENSITIVE_WORKSPACE_CHANGE_SUBMITTED", label: "طلب مراجعة ثانوية لتعديل حساس", detail: path });
+  return (await db.select().from(sensitiveWorkspaceChanges).where(eq(sensitiveWorkspaceChanges.id, Number(result.insertId))).limit(1))[0];
+}
+
+async function applyResolvedSensitiveWorkspaceChange(userId: number, projectId: number, approvalId: number, decision: "approved" | "rejected") {
+  const { db } = await requireOwnedProject(userId, projectId);
+  const [change] = await db.select().from(sensitiveWorkspaceChanges).where(and(eq(sensitiveWorkspaceChanges.projectId, projectId), eq(sensitiveWorkspaceChanges.approvalId, approvalId))).limit(1);
+  if (!change || change.status !== "pending_secondary") return null;
+  if (decision === "rejected") {
+    await db.update(sensitiveWorkspaceChanges).set({ status: "rejected" }).where(eq(sensitiveWorkspaceChanges.id, change.id));
+    await recordWorkspaceAudit(change.workspaceId, { actor: "Secondary Reviewer", action: "tool_rejected", path: change.path, detail: "رُفض اقتراح التعديل الحساس؛ بقي الملف الحالي دون تغيير." });
+    await recordExecutionEvent(userId, projectId, { actor: "Secondary Reviewer", type: "SENSITIVE_WORKSPACE_CHANGE_REJECTED", label: "رُفض تعديل حساس", detail: change.path });
+    return { status: "rejected" as const, changeId: change.id };
+  }
+  const [currentFile] = await db.select().from(workspaceFiles).where(and(eq(workspaceFiles.workspaceId, change.workspaceId), eq(workspaceFiles.path, change.path))).limit(1);
+  if (!currentFile || currentFile.version !== change.baseVersion) {
+    await db.update(sensitiveWorkspaceChanges).set({ status: "conflicted" }).where(eq(sensitiveWorkspaceChanges.id, change.id));
+    await recordWorkspaceAudit(change.workspaceId, { actor: "Secondary Reviewer", action: "tool_rejected", path: change.path, detail: "لم يطبق التعديل المعتمد لأن إصدار الملف تغير منذ تقديم الاقتراح." });
+    await recordExecutionEvent(userId, projectId, { actor: "Secondary Reviewer", type: "SENSITIVE_WORKSPACE_CHANGE_CONFLICT", label: "تعارض في تعديل حساس", detail: change.path });
+    return { status: "conflicted" as const, changeId: change.id };
+  }
+  await db.update(workspaceFiles).set({ content: change.proposedContent, version: sql`${workspaceFiles.version} + 1` }).where(and(eq(workspaceFiles.id, currentFile.id), eq(workspaceFiles.version, change.baseVersion)));
+  const [appliedFile] = await db.select().from(workspaceFiles).where(eq(workspaceFiles.id, currentFile.id)).limit(1);
+  if (!appliedFile || appliedFile.version === change.baseVersion) {
+    await db.update(sensitiveWorkspaceChanges).set({ status: "conflicted" }).where(eq(sensitiveWorkspaceChanges.id, change.id));
+    return { status: "conflicted" as const, changeId: change.id };
+  }
+  await db.update(sensitiveWorkspaceChanges).set({ status: "applied", appliedAt: new Date() }).where(eq(sensitiveWorkspaceChanges.id, change.id));
+  await recordWorkspaceAudit(change.workspaceId, { actor: "Secondary Reviewer", action: "file_written", path: change.path, detail: `اعتمدت المراجعة الثانوية وكتب الاقتراح إلى الإصدار ${appliedFile.version}.` });
+  await recordExecutionEvent(userId, projectId, { actor: "Secondary Reviewer", type: "SENSITIVE_WORKSPACE_CHANGE_APPLIED", label: "طُبق تعديل حساس بعد المراجعة", detail: change.path });
+  return { status: "applied" as const, changeId: change.id, version: appliedFile.version };
 }
 
 export async function listSandboxChecksForProject(userId: number, projectId: number, limit = 50) {
@@ -692,10 +763,12 @@ export async function listOwnerApprovalsWithEngineContext(userId: number, limit 
     project: { id: projects.id, name: projects.name, code: projects.code },
     engineStep: taskEngineSteps,
     engineRun: taskEngineRuns,
+    sensitiveChange: sensitiveWorkspaceChanges,
   }).from(approvals)
     .innerJoin(projects, eq(approvals.projectId, projects.id))
     .leftJoin(taskEngineSteps, eq(approvals.id, taskEngineSteps.approvalId))
     .leftJoin(taskEngineRuns, eq(taskEngineSteps.runId, taskEngineRuns.id))
+    .leftJoin(sensitiveWorkspaceChanges, eq(approvals.id, sensitiveWorkspaceChanges.approvalId))
     .where(eq(projects.ownerId, userId))
     .orderBy(desc(approvals.createdAt))
     .limit(limit);
@@ -740,9 +813,10 @@ export async function resolveApproval(userId: number, input: { projectId: number
     label: input.decision === "approved" ? "تم اعتماد الطلب" : "تم رفض الطلب",
     detail: approval.title,
   });
+  const sensitiveChangeTransition = await applyResolvedSensitiveWorkspaceChange(userId, input.projectId, input.approvalId, input.decision);
   const [engineStep] = await db.select().from(taskEngineSteps).where(eq(taskEngineSteps.approvalId, input.approvalId)).limit(1);
   const engineTransition = engineStep ? await advanceTaskEngineRunForProject(userId, { projectId: input.projectId, runId: engineStep.runId }) : null;
-  return { approval: (await db.select().from(approvals).where(eq(approvals.id, input.approvalId)).limit(1))[0], engineTransition };
+  return { approval: (await db.select().from(approvals).where(eq(approvals.id, input.approvalId)).limit(1))[0], engineTransition, sensitiveChangeTransition };
 }
 
 export async function getProjectCostSummary(userId: number, projectId: number) {

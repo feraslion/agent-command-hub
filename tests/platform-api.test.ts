@@ -111,4 +111,20 @@ describe("platform API security", () => {
 
     await expect(caller.isolatedRuntime.requestExecution({ projectId: 0, targetPath: "source/main.ts" })).rejects.toMatchObject({ code: "BAD_REQUEST" });
   });
+
+  it("يرفض اقتراح المراجعة الثانوية بمعرّف مشروع غير صالح قبل الوصول لقاعدة البيانات", async () => {
+    const caller = appRouter.createCaller(contextWithUser({
+      id: 1,
+      openId: "owner",
+      email: "owner@example.com",
+      name: "Owner",
+      loginMethod: "manus",
+      role: "admin",
+      createdAt: new Date(),
+      updatedAt: new Date(),
+      lastSignedIn: new Date(),
+    }));
+
+    await expect(caller.sensitiveChanges.submit({ projectId: 0, path: "source/runner.ts", content: "process.env.API_TOKEN" })).rejects.toMatchObject({ code: "BAD_REQUEST" });
+  });
 });

@@ -4,6 +4,7 @@ import { getSessionCookieOptions } from "./_core/cookies";
 import { systemRouter } from "./_core/systemRouter";
 import { protectedProcedure, publicProcedure, router } from "./_core/trpc";
 import * as db from "./db";
+import { getDryWorkerLoopStatus } from "./dry-worker";
 
 const projectIdInput = z.object({ projectId: z.number().int().positive() });
 const taskStatus = z.enum(["pending", "queued", "running", "verifying", "completed", "failed", "debugging", "retrying", "cancelled"]);
@@ -52,7 +53,7 @@ export const appRouter = router({
     })).mutation(({ ctx, input }) => db.createProjectAgent(ctx.user.id, input)),
   }),
   worker: router({
-    getStatus: protectedProcedure.query(({ ctx }) => db.getWorkerSettingsForOwner(ctx.user.id)),
+    getStatus: protectedProcedure.query(async ({ ctx }) => ({ worker: await db.getWorkerSettingsForOwner(ctx.user.id), loop: getDryWorkerLoopStatus() })),
     setDesiredState: protectedProcedure.input(z.object({ enabled: z.boolean() })).mutation(({ ctx, input }) => db.setWorkerDesiredState(ctx.user.id, input.enabled)),
   }),
   approvals: router({

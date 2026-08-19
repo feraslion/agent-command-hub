@@ -1,4 +1,4 @@
-import { and, desc, eq, sql } from "drizzle-orm";
+import { and, desc, eq, lt, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/mysql2";
 import {
   agents,
@@ -97,6 +97,94 @@ export async function setWorkerDesiredState(userId: number, enabled: boolean) {
     set: { desiredEnabled: enabled ? 1 : 0, runtimeStatus },
   });
   return getWorkerSettingsForOwner(userId);
+}
+
+export async function touchWorkerHeartbeat(userId: number) {
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+  await db.update(workerSettings).set({ runtimeStatus: "ready", lastHeartbeatAt: new Date() }).where(and(
+    eq(workerSettings.ownerId, userId),
+    eq(workerSettings.desiredEnabled, 1),
+  ));
+}
+
+export async function listEnabledWorkerOwners() {
+  const db = await getDb();
+  if (!db) return [];
+  return db.select({ ownerId: workerSettings.ownerId }).from(workerSettings).where(eq(workerSettings.desiredEnabled, 1));
+}
+
+export async function reclaimExpiredCommandLeases(leaseTimeoutMs: number) {
+  const db = await getDb();
+  if (!db) return { requeued: 0, failed: 0 };
+  const expiredBefore = new Date(Date.now() - leaseTimeoutMs);
+  const retryable = await db.update(executionCommands).set({
+    status: "queued",
+    leaseOwner: null,
+    leasedAt: null,
+    lastError: "انتهت مهلة حجز العامل الجاف؛ أُعيد الأمر إلى الطابور.",
+  }).where(and(
+    eq(executionCommands.status, "claimed"),
+    lt(executionCommands.leasedAt, expiredBefore),
+    sql`${executionCommands.attemptCount} < ${executionCommands.maxAttempts}`,
+  ));
+  const exhausted = await db.update(executionCommands).set({
+    status: "failed",
+    leaseOwner: null,
+    leasedAt: null,
+    lastError: "انتهت مهلة الحجز بعد بلوغ الحد الأقصى لإعادة المحاولة.",
+  }).where(and(
+    eq(executionCommands.status, "claimed"),
+    lt(executionCommands.leasedAt, expiredBefore),
+    sql`${executionCommands.attemptCount} >= ${executionCommands.maxAttempts}`,
+  ));
+  return { requeued: Number(retryable[0].affectedRows ?? 0), failed: Number(exhausted[0].affectedRows ?? 0) };
+}
+
+export async function claimNextDryCommand(ownerId: number, workerId: string) {
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+  const [candidate] = await db.select().from(executionCommands)
+    .innerJoin(projects, eq(executionCommands.projectId, projects.id))
+    .where(and(
+      eq(projects.ownerId, ownerId),
+      eq(executionCommands.status, "queued"),
+      sql`${executionCommands.attemptCount} < ${executionCommands.maxAttempts}`,
+    ))
+    .orderBy(executionCommands.createdAt)
+    .limit(1);
+  if (!candidate) return undefined;
+
+  const command = candidate.execution_commands;
+  const now = new Date();
+  const [result] = await db.update(executionCommands).set({
+    status: "claimed",
+    leaseOwner: workerId,
+    leasedAt: now,
+    attemptCount: sql`${executionCommands.attemptCount} + 1`,
+    lastError: null,
+  }).where(and(eq(executionCommands.id, command.id), eq(executionCommands.status, "queued")));
+  if (Number(result.affectedRows ?? 0) !== 1) return undefined;
+
+  await recordExecutionEvent(ownerId, command.projectId, {
+    taskId: command.taskId ?? undefined,
+    actor: workerId,
+    type: "DRY_COMMAND_CLAIMED",
+    label: "حجز العامل الجاف أمر التشغيل",
+    detail: `تم حجز الأمر ${command.command} بلا تنفيذ أدوات أو أوامر نظام.`,
+  });
+  return { ...command, status: "claimed" as const, leaseOwner: workerId, leasedAt: now, attemptCount: command.attemptCount + 1 };
+}
+
+export async function renewDryCommandLease(commandId: number, workerId: string) {
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+  const [result] = await db.update(executionCommands).set({ leasedAt: new Date() }).where(and(
+    eq(executionCommands.id, commandId),
+    eq(executionCommands.status, "claimed"),
+    eq(executionCommands.leaseOwner, workerId),
+  ));
+  return Number(result.affectedRows ?? 0) === 1;
 }
 
 export async function getProjectForOwner(userId: number, projectId: number) {

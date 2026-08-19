@@ -57,12 +57,14 @@ function SettingsHeader({ router, unreadAlertCount, notificationPreferences, set
 
 function ManagedWorkerControl() {
   const utils = trpc.useUtils();
-  const workerQuery = trpc.worker.getStatus.useQuery();
+  const workerQuery = trpc.worker.getStatus.useQuery(undefined, { refetchInterval: 10_000 });
   const workerMutation = trpc.worker.setDesiredState.useMutation({ onSuccess: () => utils.worker.getStatus.invalidate() });
-  const worker = workerQuery.data;
+  const status = workerQuery.data;
+  const worker = status?.worker;
   const enabled = Boolean(worker?.desiredEnabled);
   const statusText = worker?.runtimeStatus === "ready" ? "متصل وجاهز" : worker?.runtimeStatus === "awaiting_service" ? "بانتظار الخدمة الدائمة" : worker?.runtimeStatus === "offline" ? "غير متصل" : "متوقف";
-  return <View><Text style={styles.section}>العامل المُدار</Text><View style={styles.group}><SettingRow title="استقبال أوامر التشغيل" description="يحفظ طلبك لتبدأ معالجة الأوامر تلقائياً عند توفر الخدمة الدائمة." value={enabled} disabled={workerQuery.isLoading || workerMutation.isPending} onChange={(value) => workerMutation.mutate({ enabled: value })} /><View style={styles.divider} /><View style={styles.statusRow}><Text style={styles.statusValue}>{workerQuery.error ? "تعذر تحميل الحالة" : statusText}</Text><Text style={styles.statusLabel}>حالة العامل</Text></View>{enabled && worker?.runtimeStatus !== "ready" ? <Text style={styles.workerNote}>تم تفعيل استقبال الأوامر داخل التطبيق. سيبدأ التنفيذ عندما يتصل عامل الخدمة الدائمة ويرسل heartbeat.</Text> : null}</View></View>;
+  const heartbeat = worker?.lastHeartbeatAt ? new Date(worker.lastHeartbeatAt).toLocaleTimeString("ar-SA", { hour: "2-digit", minute: "2-digit", second: "2-digit" }) : "لم يصل بعد";
+  return <View><Text style={styles.section}>العامل المُدار</Text><View style={styles.group}><SettingRow title="استقبال أوامر التشغيل" description="يحفظ طلبك لتبدأ معالجة الأوامر تلقائياً عند توفر الخدمة الدائمة." value={enabled} disabled={workerQuery.isLoading || workerMutation.isPending} onChange={(value) => workerMutation.mutate({ enabled: value })} /><View style={styles.divider} /><View style={styles.statusRow}><Text style={styles.statusValue}>{workerQuery.error ? "تعذر تحميل الحالة" : statusText}</Text><Text style={styles.statusLabel}>حالة العامل</Text></View><View style={styles.divider} /><View style={styles.statusRow}><Text style={styles.statusValue}>{heartbeat}</Text><Text style={styles.statusLabel}>آخر heartbeat</Text></View><View style={styles.divider} /><View style={styles.statusRow}><Text style={styles.statusValue}>{status?.loop.configured ? `كل ${Math.round(status.loop.intervalMs / 1000)} ثوانٍ` : "معطّلة إعدادياً"}</Text><Text style={styles.statusLabel}>حلقة العامل الجاف</Text></View>{enabled && worker?.runtimeStatus !== "ready" ? <Text style={styles.workerNote}>تم تفعيل استقبال الأوامر داخل التطبيق. سيبدأ التنفيذ عندما يتصل عامل الخدمة الدائمة ويرسل heartbeat.</Text> : null}{enabled && worker?.runtimeStatus === "ready" ? <Text style={styles.workerNote}>العامل متصل: يحجز أمراً واحداً لكل مالك، ويتركه في حالة محجوزة. لا ينفذ أدوات أو أوامر نظام في هذه المرحلة.</Text> : null}</View></View>;
 }
 
 function BudgetHistoryRow({ change }: { change: BudgetLimitChange }) {

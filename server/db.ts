@@ -649,6 +649,23 @@ export async function listProjectApprovals(userId: number, projectId: number) {
   return db.select().from(approvals).where(eq(approvals.projectId, projectId)).orderBy(desc(approvals.createdAt));
 }
 
+export async function listOwnerApprovalsWithEngineContext(userId: number, limit = 100) {
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+  return db.select({
+    approval: approvals,
+    project: { id: projects.id, name: projects.name, code: projects.code },
+    engineStep: taskEngineSteps,
+    engineRun: taskEngineRuns,
+  }).from(approvals)
+    .innerJoin(projects, eq(approvals.projectId, projects.id))
+    .leftJoin(taskEngineSteps, eq(approvals.id, taskEngineSteps.approvalId))
+    .leftJoin(taskEngineRuns, eq(taskEngineSteps.runId, taskEngineRuns.id))
+    .where(eq(projects.ownerId, userId))
+    .orderBy(desc(approvals.createdAt))
+    .limit(limit);
+}
+
 export async function createApprovalRequest(userId: number, input: { projectId: number; taskId?: number; requestedBy: string; title: string; detail: string; impact: string; level: "auto" | "review" | "approval" }) {
   const { db } = await requireOwnedProject(userId, input.projectId);
   const status = input.level === "auto" ? "auto_resolved" : "pending";
@@ -688,7 +705,9 @@ export async function resolveApproval(userId: number, input: { projectId: number
     label: input.decision === "approved" ? "تم اعتماد الطلب" : "تم رفض الطلب",
     detail: approval.title,
   });
-  return (await db.select().from(approvals).where(eq(approvals.id, input.approvalId)).limit(1))[0];
+  const [engineStep] = await db.select().from(taskEngineSteps).where(eq(taskEngineSteps.approvalId, input.approvalId)).limit(1);
+  const engineTransition = engineStep ? await advanceTaskEngineRunForProject(userId, { projectId: input.projectId, runId: engineStep.runId }) : null;
+  return { approval: (await db.select().from(approvals).where(eq(approvals.id, input.approvalId)).limit(1))[0], engineTransition };
 }
 
 export async function getProjectCostSummary(userId: number, projectId: number) {

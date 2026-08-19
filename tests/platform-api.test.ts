@@ -79,4 +79,20 @@ describe("platform API security", () => {
 
     await expect(caller.runtime.listPlans({ projectId: 0 })).rejects.toMatchObject({ code: "BAD_REQUEST" });
   });
+
+  it("يتحقق من قرار الموافقة المرتبط بمحرك المهام قبل الوصول لقاعدة البيانات", async () => {
+    const caller = appRouter.createCaller(contextWithUser({
+      id: 1,
+      openId: "owner",
+      email: "owner@example.com",
+      name: "Owner",
+      loginMethod: "manus",
+      role: "admin",
+      createdAt: new Date(),
+      updatedAt: new Date(),
+      lastSignedIn: new Date(),
+    }));
+
+    await expect(caller.approvals.resolve({ projectId: 1, approvalId: 1, decision: "continue" as never })).rejects.toMatchObject({ code: "BAD_REQUEST" });
+  });
 });

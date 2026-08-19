@@ -29,6 +29,14 @@ export const appRouter = router({
       budgetLimit: z.number().min(0.5).max(10000).optional(),
     })).mutation(({ ctx, input }) => db.createProjectForOwner(ctx.user.id, input)),
   }),
+  workspace: router({
+    get: protectedProcedure.input(projectIdInput).query(({ ctx, input }) => db.getWorkspaceForProject(ctx.user.id, input.projectId)),
+    ensure: protectedProcedure.input(projectIdInput).mutation(({ ctx, input }) => db.ensureWorkspaceForProject(ctx.user.id, input.projectId)),
+    audit: protectedProcedure.input(projectIdInput.extend({ limit: z.number().int().min(1).max(100).optional() })).query(({ ctx, input }) => db.listWorkspaceAuditForProject(ctx.user.id, input.projectId, input.limit ?? 50)),
+    files: protectedProcedure.input(projectIdInput.extend({ limit: z.number().int().min(1).max(100).optional() })).query(({ ctx, input }) => db.listWorkspaceFilesForProject(ctx.user.id, input.projectId, input.limit ?? 100)),
+    readFile: protectedProcedure.input(projectIdInput.extend({ path: z.string().trim().min(1).max(512) })).query(({ ctx, input }) => db.readWorkspaceFileForProject(ctx.user.id, input)),
+    writeFile: protectedProcedure.input(projectIdInput.extend({ path: z.string().trim().min(1).max(512), content: z.string().max(64_000) })).mutation(({ ctx, input }) => db.writeWorkspaceFileForProject(ctx.user.id, input)),
+  }),
   tasks: router({
     list: protectedProcedure.input(projectIdInput).query(({ ctx, input }) => db.listProjectTasks(ctx.user.id, input.projectId)),
     create: protectedProcedure.input(z.object({

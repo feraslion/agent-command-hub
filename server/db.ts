@@ -14,8 +14,12 @@ import {
   type User,
   users,
   workerSettings,
+  workspaceAuditLogs,
+  workspaceFiles,
+  workspaces,
 } from "../drizzle/schema";
 import { ENV } from "./_core/env";
+import { assertWorkspaceContent, normalizeWorkspacePath, WorkspacePathError } from "./workspace-policy";
 
 let _db: ReturnType<typeof drizzle> | null = null;
 
@@ -79,6 +83,106 @@ export async function listProjectsForOwner(userId: number) {
   const db = await getDb();
   if (!db) return [];
   return db.select().from(projects).where(eq(projects.ownerId, userId)).orderBy(desc(projects.updatedAt));
+}
+
+export const restrictedWorkspaceDirectories = ["source", "docs", "tests", "artifacts", "memory", "logs"] as const;
+
+export async function recordWorkspaceAudit(workspaceId: number, input: { actor: string; action: "workspace_created" | "file_read" | "file_written" | "path_rejected" | "tool_rejected" | "sandbox_checked" | "gate_requested"; path?: string; detail: string }) {
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+  const [result] = await db.insert(workspaceAuditLogs).values({
+    workspaceId,
+    actor: input.actor,
+    action: input.action,
+    path: input.path ?? null,
+    detail: input.detail,
+  });
+  return Number(result.insertId);
+}
+
+export async function getWorkspaceForProject(userId: number, projectId: number) {
+  const { db } = await requireOwnedProject(userId, projectId);
+  const [workspace] = await db.select().from(workspaces).where(eq(workspaces.projectId, projectId)).limit(1);
+  return workspace;
+}
+
+export async function ensureWorkspaceForProject(userId: number, projectId: number) {
+  const { db } = await requireOwnedProject(userId, projectId);
+  const [existing] = await db.select().from(workspaces).where(eq(workspaces.projectId, projectId)).limit(1);
+  if (existing) return { workspace: existing, created: false, directories: restrictedWorkspaceDirectories };
+  const [result] = await db.insert(workspaces).values({ projectId });
+  const workspaceId = Number(result.insertId);
+  await recordWorkspaceAudit(workspaceId, {
+    actor: "Workspace Manager",
+    action: "workspace_created",
+    detail: "تم إنشاء Workspace افتراضية مقيدة. لا تمثل مساراً لنظام التشغيل.",
+  });
+  const [workspace] = await db.select().from(workspaces).where(eq(workspaces.id, workspaceId)).limit(1);
+  return { workspace, created: true, directories: restrictedWorkspaceDirectories };
+}
+
+export async function listWorkspaceAuditForProject(userId: number, projectId: number, limit = 50) {
+  const { db } = await requireOwnedProject(userId, projectId);
+  const [workspace] = await db.select().from(workspaces).where(eq(workspaces.projectId, projectId)).limit(1);
+  if (!workspace) return [];
+  return db.select().from(workspaceAuditLogs).where(eq(workspaceAuditLogs.workspaceId, workspace.id)).orderBy(desc(workspaceAuditLogs.createdAt)).limit(limit);
+}
+
+export async function listWorkspaceFilesForProject(userId: number, projectId: number, limit = 100) {
+  const { db } = await requireOwnedProject(userId, projectId);
+  const [workspace] = await db.select().from(workspaces).where(eq(workspaces.projectId, projectId)).limit(1);
+  if (!workspace) return [];
+  return db.select({ id: workspaceFiles.id, path: workspaceFiles.path, version: workspaceFiles.version, createdAt: workspaceFiles.createdAt, updatedAt: workspaceFiles.updatedAt }).from(workspaceFiles).where(eq(workspaceFiles.workspaceId, workspace.id)).orderBy(workspaceFiles.path).limit(limit);
+}
+
+export async function readWorkspaceFileForProject(userId: number, input: { projectId: number; path: string; actor?: string }) {
+  const ensured = await ensureWorkspaceForProject(userId, input.projectId);
+  const workspace = ensured.workspace;
+  try {
+    const path = normalizeWorkspacePath(input.path);
+    const db = await getDb();
+    if (!db) throw new Error("Database not available");
+    const [file] = await db.select().from(workspaceFiles).where(and(eq(workspaceFiles.workspaceId, workspace.id), eq(workspaceFiles.path, path))).limit(1);
+    await recordWorkspaceAudit(workspace.id, {
+      actor: input.actor ?? "File Reader",
+      action: "file_read",
+      path,
+      detail: file ? `تمت قراءة ملف افتراضي بإصدار ${file.version}.` : "لم يوجد الملف المطلوب داخل Workspace.",
+    });
+    return file;
+  } catch (error) {
+    if (error instanceof WorkspacePathError) {
+      await recordWorkspaceAudit(workspace.id, { actor: input.actor ?? "File Reader", action: "path_rejected", path: input.path.slice(0, 512), detail: error.message });
+    }
+    throw error;
+  }
+}
+
+export async function writeWorkspaceFileForProject(userId: number, input: { projectId: number; path: string; content: string; actor?: string }) {
+  const ensured = await ensureWorkspaceForProject(userId, input.projectId);
+  const workspace = ensured.workspace;
+  try {
+    const path = normalizeWorkspacePath(input.path);
+    const content = assertWorkspaceContent(input.content);
+    const db = await getDb();
+    if (!db) throw new Error("Database not available");
+    await db.insert(workspaceFiles).values({ workspaceId: workspace.id, path, content }).onDuplicateKeyUpdate({
+      set: { content, version: sql`${workspaceFiles.version} + 1` },
+    });
+    const [file] = await db.select().from(workspaceFiles).where(and(eq(workspaceFiles.workspaceId, workspace.id), eq(workspaceFiles.path, path))).limit(1);
+    await recordWorkspaceAudit(workspace.id, {
+      actor: input.actor ?? "File Writer",
+      action: "file_written",
+      path,
+      detail: `تم حفظ ملف افتراضي بالإصدار ${file.version} داخل حدود Workspace.`,
+    });
+    return file;
+  } catch (error) {
+    if (error instanceof WorkspacePathError) {
+      await recordWorkspaceAudit(workspace.id, { actor: input.actor ?? "File Writer", action: "path_rejected", path: input.path.slice(0, 512), detail: error.message });
+    }
+    throw error;
+  }
 }
 
 export async function getWorkerSettingsForOwner(userId: number) {

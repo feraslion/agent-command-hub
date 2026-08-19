@@ -21,6 +21,8 @@ export const executionCommandTypeValues = ["run_project", "run_task", "resume_ta
 export const executionCommandStatusValues = ["queued", "claimed", "completed", "failed", "cancelled"] as const;
 export const executionPlanStatusValues = ["ready", "blocked", "superseded"] as const;
 export const workerRuntimeStatusValues = ["disabled", "awaiting_service", "ready", "offline"] as const;
+export const workspaceStatusValues = ["active", "archived"] as const;
+export const workspaceAuditActionValues = ["workspace_created", "file_read", "file_written", "path_rejected", "tool_rejected", "sandbox_checked", "gate_requested"] as const;
 
 export const projects = mysqlTable("projects", {
   id: int("id").autoincrement().primaryKey(),
@@ -152,6 +154,42 @@ export const executionPlans = mysqlTable("execution_plans", {
 }, (table) => [
   uniqueIndex("execution_plans_command_unique").on(table.commandId),
   index("execution_plans_project_created_idx").on(table.projectId, table.createdAt),
+]);
+
+export const workspaces = mysqlTable("workspaces", {
+  id: int("id").autoincrement().primaryKey(),
+  projectId: int("project_id").notNull().references(() => projects.id, { onDelete: "cascade" }),
+  status: mysqlEnum("status", workspaceStatusValues).default("active").notNull(),
+  mode: varchar("mode", { length: 32 }).default("virtual_restricted").notNull(),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().onUpdateNow().notNull(),
+}, (table) => [
+  uniqueIndex("workspaces_project_unique").on(table.projectId),
+]);
+
+export const workspaceFiles = mysqlTable("workspace_files", {
+  id: int("id").autoincrement().primaryKey(),
+  workspaceId: int("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+  path: varchar("path", { length: 512 }).notNull(),
+  content: text("content").notNull(),
+  version: int("version").default(1).notNull(),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().onUpdateNow().notNull(),
+}, (table) => [
+  uniqueIndex("workspace_files_workspace_path_unique").on(table.workspaceId, table.path),
+  index("workspace_files_workspace_updated_idx").on(table.workspaceId, table.updatedAt),
+]);
+
+export const workspaceAuditLogs = mysqlTable("workspace_audit_logs", {
+  id: int("id").autoincrement().primaryKey(),
+  workspaceId: int("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+  actor: varchar("actor", { length: 128 }).notNull(),
+  action: mysqlEnum("action", workspaceAuditActionValues).notNull(),
+  path: varchar("path", { length: 512 }),
+  detail: text("detail").notNull(),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+}, (table) => [
+  index("workspace_audit_workspace_created_idx").on(table.workspaceId, table.createdAt),
 ]);
 
 export const workerSettings = mysqlTable("worker_settings", {

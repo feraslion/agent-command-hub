@@ -31,4 +31,20 @@ describe("platform API security", () => {
 
     await expect(caller.projects.create({ name: "x", code: "bad code" })).rejects.toMatchObject({ code: "BAD_REQUEST" });
   });
+
+  it("يرفض أمر تشغيل لا يحتوي معرّف مشروع صالح قبل الوصول لقاعدة البيانات", async () => {
+    const caller = appRouter.createCaller(contextWithUser({
+      id: 1,
+      openId: "owner",
+      email: "owner@example.com",
+      name: "Owner",
+      loginMethod: "manus",
+      role: "admin",
+      createdAt: new Date(),
+      updatedAt: new Date(),
+      lastSignedIn: new Date(),
+    }));
+
+    await expect(caller.commands.enqueue({ projectId: 0, command: "run_project" })).rejects.toMatchObject({ code: "BAD_REQUEST" });
+  });
 });

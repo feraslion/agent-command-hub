@@ -17,6 +17,8 @@ export const taskStatusValues = ["pending", "queued", "running", "verifying", "c
 export const agentStatusValues = ["idle", "running", "disabled", "error"] as const;
 export const approvalLevelValues = ["auto", "review", "approval"] as const;
 export const approvalStatusValues = ["pending", "approved", "rejected", "auto_resolved"] as const;
+export const executionCommandTypeValues = ["run_project", "run_task", "resume_task"] as const;
+export const executionCommandStatusValues = ["queued", "claimed", "completed", "failed", "cancelled"] as const;
 
 export const projects = mysqlTable("projects", {
   id: int("id").autoincrement().primaryKey(),
@@ -112,6 +114,26 @@ export const executionEvents = mysqlTable("execution_events", {
   createdAt: timestamp("created_at").defaultNow().notNull(),
 }, (table) => [
   index("execution_events_project_created_idx").on(table.projectId, table.createdAt),
+]);
+
+export const executionCommands = mysqlTable("execution_commands", {
+  id: int("id").autoincrement().primaryKey(),
+  projectId: int("project_id").notNull().references(() => projects.id, { onDelete: "cascade" }),
+  taskId: int("task_id").references(() => tasks.id, { onDelete: "set null" }),
+  requestedByUserId: int("requested_by_user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+  command: mysqlEnum("command", executionCommandTypeValues).notNull(),
+  payload: text("payload"),
+  status: mysqlEnum("status", executionCommandStatusValues).default("queued").notNull(),
+  attemptCount: int("attempt_count").default(0).notNull(),
+  maxAttempts: int("max_attempts").default(3).notNull(),
+  leaseOwner: varchar("lease_owner", { length: 128 }),
+  leasedAt: timestamp("leased_at"),
+  lastError: text("last_error"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().onUpdateNow().notNull(),
+}, (table) => [
+  index("execution_commands_project_created_idx").on(table.projectId, table.createdAt),
+  index("execution_commands_status_created_idx").on(table.status, table.createdAt),
 ]);
 
 export const artifacts = mysqlTable("artifacts", {

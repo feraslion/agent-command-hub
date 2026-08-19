@@ -4,6 +4,7 @@ import {
   agents,
   approvals,
   costEntries,
+  executionCommands,
   executionEvents,
   projects,
   taskStatusValues,
@@ -170,6 +171,37 @@ export async function createProjectAgent(userId: number, input: { projectId: num
 export async function listProjectEvents(userId: number, projectId: number, limit = 50) {
   const { db } = await requireOwnedProject(userId, projectId);
   return db.select().from(executionEvents).where(eq(executionEvents.projectId, projectId)).orderBy(desc(executionEvents.createdAt)).limit(limit);
+}
+
+export async function listProjectCommands(userId: number, projectId: number, limit = 50) {
+  const { db } = await requireOwnedProject(userId, projectId);
+  return db.select().from(executionCommands).where(eq(executionCommands.projectId, projectId)).orderBy(desc(executionCommands.createdAt)).limit(limit);
+}
+
+export async function enqueueExecutionCommand(userId: number, input: { projectId: number; taskId?: number; command: "run_project" | "run_task" | "resume_task"; payload?: string }) {
+  const { db } = await requireOwnedProject(userId, input.projectId);
+  if ((input.command === "run_task" || input.command === "resume_task") && !input.taskId) throw new Error("Task command requires a taskId");
+  if (input.taskId) {
+    const [task] = await db.select({ id: tasks.id }).from(tasks).where(and(eq(tasks.id, input.taskId), eq(tasks.projectId, input.projectId))).limit(1);
+    if (!task) throw new Error("Task not found");
+  }
+  const [result] = await db.insert(executionCommands).values({
+    projectId: input.projectId,
+    taskId: input.taskId ?? null,
+    requestedByUserId: userId,
+    command: input.command,
+    payload: input.payload ?? null,
+  });
+  const commandId = Number(result.insertId);
+  await db.update(projects).set({ status: "active", currentStage: "queued" }).where(eq(projects.id, input.projectId));
+  await recordExecutionEvent(userId, input.projectId, {
+    taskId: input.taskId,
+    actor: "مالك المشروع",
+    type: "EXECUTION_COMMAND_QUEUED",
+    label: "تم إرسال أمر تشغيل",
+    detail: `الأمر ${input.command} في انتظار العامل الدائم (معرّف ${commandId}).`,
+  });
+  return (await db.select().from(executionCommands).where(eq(executionCommands.id, commandId)).limit(1))[0];
 }
 
 export async function recordExecutionEvent(userId: number, projectId: number, input: { taskId?: number; actor: string; type: string; label: string; detail: string }) {

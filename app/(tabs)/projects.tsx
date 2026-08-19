@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { FlatList, Pressable, StyleSheet, Text, View } from "react-native";
 import { ScreenContainer } from "@/components/screen-container";
 import { StatusPill } from "@/components/hub/status-pill";
@@ -30,6 +31,14 @@ export default function ProjectsScreen() {
   const createMutation = trpc.projects.create.useMutation({
     onSuccess: () => utils.projects.list.invalidate(),
   });
+  const [commandNotice, setCommandNotice] = useState("");
+  const commandMutation = trpc.commands.enqueue.useMutation({
+    onSuccess: (_, input) => {
+      setCommandNotice(`تم وضع أمر تشغيل المشروع في قائمة الانتظار. معرّف المشروع: ${input.projectId}.`);
+      utils.projects.list.invalidate();
+      utils.commands.list.invalidate({ projectId: input.projectId });
+    },
+  });
   const projects = projectsQuery.data ?? [];
 
   const createProject = () => {
@@ -39,6 +48,11 @@ export default function ProjectsScreen() {
       code: `P${String(nextNumber).padStart(3, "0")}`,
       budgetLimit: 2.5,
     });
+  };
+
+  const enqueueProjectRun = (projectId: number) => {
+    setCommandNotice("");
+    commandMutation.mutate({ projectId, command: "run_project" });
   };
 
   const errorText = projectsQuery.error?.data?.code === "UNAUTHORIZED"
@@ -65,10 +79,12 @@ export default function ProjectsScreen() {
             </Pressable>
             {errorText ? <View style={[styles.error, { backgroundColor: "#4A202A", borderColor: "#6C2C3B" }]}><Text style={styles.errorText}>{errorText}</Text></View> : null}
             {createMutation.error ? <View style={[styles.error, { backgroundColor: "#4A202A", borderColor: "#6C2C3B" }]}><Text style={styles.errorText}>تعذر إنشاء المشروع. تحقق من اتصالك ثم أعد المحاولة.</Text></View> : null}
+            {commandMutation.error ? <View style={[styles.error, { backgroundColor: "#4A202A", borderColor: "#6C2C3B" }]}><Text style={styles.errorText}>تعذر إرسال أمر التشغيل. تحقق من صلاحية المشروع ثم أعد المحاولة.</Text></View> : null}
+            {commandNotice ? <View style={[styles.notice, { backgroundColor: colors.subtle, borderColor: colors.border }]}><Text style={[styles.noticeText, { color: colors.foreground }]}>{commandNotice}</Text></View> : null}
             <SectionTitle title="كل المشاريع" caption={projectsQuery.isLoading ? "جارٍ التحميل من قاعدة البيانات…" : `${projects.length} مشاريع محفوظة`} />
           </View>
         }
-        renderItem={({ item }) => <ProjectCard project={item} wide={isWide} colors={colors} />}
+        renderItem={({ item }) => <ProjectCard project={item} wide={isWide} colors={colors} onRun={() => enqueueProjectRun(item.id)} isSubmitting={commandMutation.isPending} />}
         ItemSeparatorComponent={() => <View style={styles.separator} />}
         ListEmptyComponent={!projectsQuery.isLoading && !errorText ? <View style={[styles.empty, { backgroundColor: colors.surface, borderColor: colors.border }]}><Text style={[styles.emptyTitle, { color: colors.foreground }]}>لا توجد مشاريع محفوظة بعد</Text><Text style={[styles.emptyText, { color: colors.muted }]}>أنشئ مشروعاً ليصبح نقطة البداية للمهام والأحداث والموافقات الفعلية.</Text></View> : null}
       />
@@ -76,7 +92,7 @@ export default function ProjectsScreen() {
   );
 }
 
-function ProjectCard({ project, wide, colors }: { project: { id: number; name: string; code: string; status: keyof typeof statusLabel; progress: number; currentStage: string; updatedAt: Date }; wide: boolean; colors: ReturnType<typeof useColors> }) {
+function ProjectCard({ project, wide, colors, onRun, isSubmitting }: { project: { id: number; name: string; code: string; status: keyof typeof statusLabel; progress: number; currentStage: string; updatedAt: Date }; wide: boolean; colors: ReturnType<typeof useColors>; onRun: () => void; isSubmitting: boolean }) {
   return (
     <View style={[styles.card, wide && styles.cardWide, { backgroundColor: colors.surface, borderColor: colors.border }]}>
       <View style={styles.cardTop}>
@@ -87,6 +103,7 @@ function ProjectCard({ project, wide, colors }: { project: { id: number; name: s
       <Text style={[styles.stage, { color: colors.muted }]}>المرحلة الحالية · {project.currentStage}</Text>
       <View style={[styles.progressTrack, { backgroundColor: colors.subtle }]}><View style={[styles.progressFill, { width: `${project.progress}%`, backgroundColor: colors.primary }]} /></View>
       <View style={styles.cardBottom}><Text style={[styles.updated, { color: colors.muted }]}>{formatUpdatedAt(project.updatedAt)}</Text><Text style={[styles.progressLabel, { color: colors.foreground }]}>{project.progress}% مكتمل</Text></View>
+      <Pressable disabled={isSubmitting} onPress={onRun} style={({ pressed }) => [styles.runButton, { backgroundColor: colors.primary }, (pressed || isSubmitting) && styles.pressed]}><Text style={styles.runButtonText}>{isSubmitting ? "جارٍ إرسال الأمر…" : "إرسال إلى العامل"}</Text><Text style={styles.runArrow}>←</Text></Pressable>
     </View>
   );
 }
@@ -107,6 +124,8 @@ const styles = StyleSheet.create({
   pressed: { opacity: 0.68, transform: [{ scale: 0.98 }] },
   error: { backgroundColor: "#FFF0F2", borderColor: "#FFC7CF", borderRadius: 14, borderWidth: 1, marginBottom: 20, padding: 12 },
   errorText: { color: "#B4233B", fontSize: 13, lineHeight: 19, textAlign: "right" },
+  notice: { borderRadius: 14, borderWidth: 1, marginBottom: 16, padding: 12 },
+  noticeText: { fontSize: 13, lineHeight: 19, textAlign: "right" },
   card: { backgroundColor: "#FFFFFF", borderColor: "#EAECF2", borderRadius: 20, borderWidth: 1, padding: 17, shadowColor: "#26324A", shadowOffset: { width: 0, height: 5 }, shadowOpacity: 0.05, shadowRadius: 12, elevation: 2 },
   cardWide: { flex: 1 },
   cardTop: { alignItems: "center", flexDirection: "row-reverse", justifyContent: "space-between" },
@@ -119,6 +138,9 @@ const styles = StyleSheet.create({
   cardBottom: { flexDirection: "row-reverse", justifyContent: "space-between", marginTop: 10 },
   updated: { color: "#8A90A3", fontSize: 12 },
   progressLabel: { color: "#3D4052", fontSize: 12, fontWeight: "700" },
+  runButton: { alignItems: "center", borderRadius: 13, flexDirection: "row-reverse", justifyContent: "space-between", marginTop: 15, minHeight: 44, paddingHorizontal: 14 },
+  runButtonText: { color: "#FFFFFF", fontSize: 13, fontWeight: "900" },
+  runArrow: { color: "#FFFFFF", fontSize: 17 },
   separator: { height: 12 },
   gridRow: { gap: 12, marginBottom: 12 },
   empty: { alignItems: "center", backgroundColor: "#FFFFFF", borderColor: "#EAECF2", borderRadius: 20, borderWidth: 1, padding: 24 },

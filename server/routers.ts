@@ -82,6 +82,15 @@ export const appRouter = router({
       amount: z.number().positive().max(100000),
     })).mutation(({ ctx, input }) => db.recordProjectCost(ctx.user.id, input)),
   }),
+  commands: router({
+    list: protectedProcedure.input(projectIdInput.extend({ limit: z.number().int().min(1).max(100).optional() })).query(({ ctx, input }) => db.listProjectCommands(ctx.user.id, input.projectId, input.limit ?? 50)),
+    enqueue: protectedProcedure.input(z.object({
+      projectId: z.number().int().positive(),
+      taskId: z.number().int().positive().optional(),
+      command: z.enum(["run_project", "run_task", "resume_task"]),
+      payload: z.string().trim().max(12000).optional(),
+    })).mutation(({ ctx, input }) => db.enqueueExecutionCommand(ctx.user.id, input)),
+  }),
   events: router({
     list: protectedProcedure.input(projectIdInput.extend({ limit: z.number().int().min(1).max(200).optional() })).query(({ ctx, input }) => db.listProjectEvents(ctx.user.id, input.projectId, input.limit ?? 50)),
   }),

@@ -12,6 +12,7 @@ import {
   type InsertUser,
   type User,
   users,
+  workerSettings,
 } from "../drizzle/schema";
 import { ENV } from "./_core/env";
 
@@ -77,6 +78,25 @@ export async function listProjectsForOwner(userId: number) {
   const db = await getDb();
   if (!db) return [];
   return db.select().from(projects).where(eq(projects.ownerId, userId)).orderBy(desc(projects.updatedAt));
+}
+
+export async function getWorkerSettingsForOwner(userId: number) {
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+  const [existing] = await db.select().from(workerSettings).where(eq(workerSettings.ownerId, userId)).limit(1);
+  if (existing) return existing;
+  await db.insert(workerSettings).values({ ownerId: userId });
+  return (await db.select().from(workerSettings).where(eq(workerSettings.ownerId, userId)).limit(1))[0];
+}
+
+export async function setWorkerDesiredState(userId: number, enabled: boolean) {
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+  const runtimeStatus = enabled ? "awaiting_service" : "disabled";
+  await db.insert(workerSettings).values({ ownerId: userId, desiredEnabled: enabled ? 1 : 0, runtimeStatus }).onDuplicateKeyUpdate({
+    set: { desiredEnabled: enabled ? 1 : 0, runtimeStatus },
+  });
+  return getWorkerSettingsForOwner(userId);
 }
 
 export async function getProjectForOwner(userId: number, projectId: number) {

@@ -19,6 +19,7 @@ export const approvalLevelValues = ["auto", "review", "approval"] as const;
 export const approvalStatusValues = ["pending", "approved", "rejected", "auto_resolved"] as const;
 export const executionCommandTypeValues = ["run_project", "run_task", "resume_task"] as const;
 export const executionCommandStatusValues = ["queued", "claimed", "completed", "failed", "cancelled"] as const;
+export const workerRuntimeStatusValues = ["disabled", "awaiting_service", "ready", "offline"] as const;
 
 export const projects = mysqlTable("projects", {
   id: int("id").autoincrement().primaryKey(),
@@ -134,6 +135,18 @@ export const executionCommands = mysqlTable("execution_commands", {
 }, (table) => [
   index("execution_commands_project_created_idx").on(table.projectId, table.createdAt),
   index("execution_commands_status_created_idx").on(table.status, table.createdAt),
+]);
+
+export const workerSettings = mysqlTable("worker_settings", {
+  id: int("id").autoincrement().primaryKey(),
+  ownerId: int("owner_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+  desiredEnabled: int("desired_enabled").default(0).notNull(),
+  runtimeStatus: mysqlEnum("runtime_status", workerRuntimeStatusValues).default("disabled").notNull(),
+  serviceLabel: varchar("service_label", { length: 128 }).default("Managed worker").notNull(),
+  lastHeartbeatAt: timestamp("last_heartbeat_at"),
+  updatedAt: timestamp("updated_at").defaultNow().onUpdateNow().notNull(),
+}, (table) => [
+  uniqueIndex("worker_settings_owner_unique").on(table.ownerId),
 ]);
 
 export const artifacts = mysqlTable("artifacts", {

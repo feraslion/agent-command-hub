@@ -51,6 +51,10 @@ export const appRouter = router({
       permissions: z.string().trim().max(8000).optional(),
     })).mutation(({ ctx, input }) => db.createProjectAgent(ctx.user.id, input)),
   }),
+  worker: router({
+    getStatus: protectedProcedure.query(({ ctx }) => db.getWorkerSettingsForOwner(ctx.user.id)),
+    setDesiredState: protectedProcedure.input(z.object({ enabled: z.boolean() })).mutation(({ ctx, input }) => db.setWorkerDesiredState(ctx.user.id, input.enabled)),
+  }),
   approvals: router({
     list: protectedProcedure.input(projectIdInput).query(({ ctx, input }) => db.listProjectApprovals(ctx.user.id, input.projectId)),
     create: protectedProcedure.input(z.object({

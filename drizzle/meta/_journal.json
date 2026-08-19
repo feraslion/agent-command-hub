@@ -85,6 +85,20 @@
       "when": 1787166072800,
       "tag": "0011_dazzling_ghost_rider",
       "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "5",
+      "when": 1787167949790,
+      "tag": "0012_shocking_gwen_stacy",
+      "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "5",
+      "when": 1787168003687,
+      "tag": "0013_eager_psylocke",
+      "breakpoints": true
     }
   ]
 }

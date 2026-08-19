@@ -1,0 +1,1 @@
+ALTER TABLE `agent_prompt_assignments` MODIFY COLUMN `custom_instructions` text NOT NULL;

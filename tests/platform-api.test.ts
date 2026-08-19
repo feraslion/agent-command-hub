@@ -143,4 +143,20 @@ describe("platform API security", () => {
 
     await expect(caller.sensitiveChanges.listApplied({ projectId: 0 })).rejects.toMatchObject({ code: "BAD_REQUEST" });
   });
+
+  it("يتحقق من تعيين قالب System Prompt للوكيل قبل الوصول لقاعدة البيانات", async () => {
+    const caller = appRouter.createCaller(contextWithUser({
+      id: 1,
+      openId: "owner",
+      email: "owner@example.com",
+      name: "Owner",
+      loginMethod: "manus",
+      role: "admin",
+      createdAt: new Date(),
+      updatedAt: new Date(),
+      lastSignedIn: new Date(),
+    }));
+
+    await expect(caller.agentPrompts.save({ agentKey: "Planner Agent", templateKey: "planner", customInstructions: "" })).rejects.toMatchObject({ code: "BAD_REQUEST" });
+  });
 });

@@ -29,6 +29,7 @@ export const sandboxCheckKindValues = ["workspace_policy", "logical_test", "git_
 export const sandboxCheckStatusValues = ["passed", "blocked", "awaiting_approval", "rejected"] as const;
 export const isolatedRuntimeRequestStatusValues = ["environment_required", "blocked", "approved", "submitted", "completed", "failed"] as const;
 export const sensitiveWorkspaceChangeStatusValues = ["pending_secondary", "applied", "rejected", "conflicted"] as const;
+export const promptTemplateKeyValues = ["planner", "coder", "qa"] as const;
 
 export const projects = mysqlTable("projects", {
   id: int("id").autoincrement().primaryKey(),
@@ -62,6 +63,18 @@ export const agents = mysqlTable("agents", {
 }, (table) => [
   uniqueIndex("agents_project_key_unique").on(table.projectId, table.key),
   index("agents_project_status_idx").on(table.projectId, table.status),
+]);
+
+export const agentPromptAssignments = mysqlTable("agent_prompt_assignments", {
+  id: int("id").autoincrement().primaryKey(),
+  ownerId: int("owner_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+  agentKey: varchar("agent_key", { length: 64 }).notNull(),
+  templateKey: mysqlEnum("template_key", promptTemplateKeyValues).notNull(),
+  customInstructions: text("custom_instructions").notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().onUpdateNow().notNull(),
+}, (table) => [
+  uniqueIndex("agent_prompt_assignments_owner_agent_unique").on(table.ownerId, table.agentKey),
+  index("agent_prompt_assignments_owner_updated_idx").on(table.ownerId, table.updatedAt),
 ]);
 
 export const tasks = mysqlTable("tasks", {

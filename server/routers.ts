@@ -5,6 +5,7 @@ import { systemRouter } from "./_core/systemRouter";
 import { protectedProcedure, publicProcedure, router } from "./_core/trpc";
 import * as db from "./db";
 import { getDryWorkerLoopStatus } from "./dry-worker";
+import { promptTemplateLibrary } from "./prompt-library";
 
 const projectIdInput = z.object({ projectId: z.number().int().positive() });
 const taskStatus = z.enum(["pending", "queued", "running", "verifying", "completed", "failed", "debugging", "retrying", "cancelled"]);
@@ -64,6 +65,15 @@ export const appRouter = router({
       capabilities: z.string().trim().max(8000).optional(),
       permissions: z.string().trim().max(8000).optional(),
     })).mutation(({ ctx, input }) => db.createProjectAgent(ctx.user.id, input)),
+  }),
+  agentPrompts: router({
+    library: protectedProcedure.query(() => promptTemplateLibrary),
+    list: protectedProcedure.query(({ ctx }) => db.listAgentPromptAssignmentsForOwner(ctx.user.id)),
+    save: protectedProcedure.input(z.object({
+      agentKey: z.string().trim().min(2).max(64).regex(/^[a-z0-9_-]+$/),
+      templateKey: z.enum(["planner", "coder", "qa"]),
+      customInstructions: z.string().trim().max(4000),
+    })).mutation(({ ctx, input }) => db.upsertAgentPromptAssignmentForOwner(ctx.user.id, input)),
   }),
   worker: router({
     getStatus: protectedProcedure.query(async ({ ctx }) => ({ worker: await db.getWorkerSettingsForOwner(ctx.user.id), loop: getDryWorkerLoopStatus() })),

@@ -1,6 +1,7 @@
 import { and, desc, eq, inArray, lt, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/mysql2";
 import {
+  agentPromptAssignments,
   agents,
   approvals,
   costEntries,
@@ -692,6 +693,26 @@ export async function updateTaskStatus(userId: number, input: { projectId: numbe
 export async function listProjectAgents(userId: number, projectId: number) {
   const { db } = await requireOwnedProject(userId, projectId);
   return db.select().from(agents).where(eq(agents.projectId, projectId)).orderBy(agents.name);
+}
+
+export async function listAgentPromptAssignmentsForOwner(userId: number) {
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+  return db.select().from(agentPromptAssignments).where(eq(agentPromptAssignments.ownerId, userId)).orderBy(desc(agentPromptAssignments.updatedAt));
+}
+
+export async function upsertAgentPromptAssignmentForOwner(userId: number, input: { agentKey: string; templateKey: "planner" | "coder" | "qa"; customInstructions: string }) {
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+  await db.insert(agentPromptAssignments).values({
+    ownerId: userId,
+    agentKey: input.agentKey,
+    templateKey: input.templateKey,
+    customInstructions: input.customInstructions,
+  }).onDuplicateKeyUpdate({
+    set: { templateKey: input.templateKey, customInstructions: input.customInstructions },
+  });
+  return (await db.select().from(agentPromptAssignments).where(and(eq(agentPromptAssignments.ownerId, userId), eq(agentPromptAssignments.agentKey, input.agentKey))).limit(1))[0];
 }
 
 export async function createProjectAgent(userId: number, input: { projectId: number; key: string; name: string; role: string; capabilities?: string; permissions?: string }) {

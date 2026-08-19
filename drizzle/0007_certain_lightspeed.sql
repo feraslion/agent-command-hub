@@ -1,0 +1,2 @@
+ALTER TABLE `task_engine_steps` ADD `approval_id` int;--> statement-breakpoint
+ALTER TABLE `task_engine_steps` ADD CONSTRAINT `task_engine_steps_approval_id_approvals_id_fk` FOREIGN KEY (`approval_id`) REFERENCES `approvals`(`id`) ON DELETE set null ON UPDATE no action;

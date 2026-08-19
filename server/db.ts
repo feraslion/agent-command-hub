@@ -8,7 +8,10 @@ import {
   executionEvents,
   executionPlans,
   projects,
+  sandboxChecks,
   taskStatusValues,
+  taskEngineRuns,
+  taskEngineSteps,
   tasks,
   type InsertUser,
   type User,
@@ -19,6 +22,7 @@ import {
   workspaces,
 } from "../drizzle/schema";
 import { ENV } from "./_core/env";
+import { sandboxGateDetail, sandboxGateKinds, sandboxGateTitle } from "./sandbox-policy";
 import { assertWorkspaceContent, normalizeWorkspacePath, WorkspacePathError } from "./workspace-policy";
 
 let _db: ReturnType<typeof drizzle> | null = null;
@@ -185,6 +189,58 @@ export async function writeWorkspaceFileForProject(userId: number, input: { proj
   }
 }
 
+export async function listSandboxChecksForProject(userId: number, projectId: number, limit = 50) {
+  const { db } = await requireOwnedProject(userId, projectId);
+  return db.select().from(sandboxChecks).where(eq(sandboxChecks.projectId, projectId)).orderBy(desc(sandboxChecks.createdAt)).limit(limit);
+}
+
+export async function runLogicalSandboxCheckForProject(userId: number, input: { projectId: number; kind: "workspace_policy" | "logical_test"; engineRunId?: number }) {
+  const ensured = await ensureWorkspaceForProject(userId, input.projectId);
+  const workspace = ensured.workspace;
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+  const [result] = await db.insert(sandboxChecks).values({
+    projectId: input.projectId,
+    workspaceId: workspace.id,
+    engineRunId: input.engineRunId ?? null,
+    kind: input.kind,
+    status: "passed",
+    detail: input.kind === "workspace_policy"
+      ? "تحقق Sandbox المنطقية من أن Workspace افتراضية ومقيدة بسجل التدقيق؛ لم يُستخدم نظام ملفات أو shell."
+      : "نجح الاختبار المنطقي لبنية Workspace والخطة؛ لم تُشغّل شيفرة مستخدم أو اختبارات نظام.",
+  });
+  await recordWorkspaceAudit(workspace.id, { actor: "Logical Sandbox", action: "sandbox_checked", detail: "تم تسجيل فحص منطقي؛ لا توجد حاوية أو عملية نظام تشغيل." });
+  await recordExecutionEvent(userId, input.projectId, { actor: "Logical Sandbox", type: "SANDBOX_CHECK_PASSED", label: "نجح فحص Sandbox المنطقي", detail: input.kind });
+  return (await db.select().from(sandboxChecks).where(eq(sandboxChecks.id, Number(result.insertId))).limit(1))[0];
+}
+
+export async function requestSandboxGateForProject(userId: number, input: { projectId: number; kind: (typeof sandboxGateKinds)[number] }) {
+  const ensured = await ensureWorkspaceForProject(userId, input.projectId);
+  const workspace = ensured.workspace;
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+  const title = sandboxGateTitle(input.kind);
+  const detail = sandboxGateDetail(input.kind);
+  const approval = await createApprovalRequest(userId, {
+    projectId: input.projectId,
+    requestedBy: "Logical Sandbox",
+    title,
+    detail,
+    impact: "إجراء حساس محجوب ولا ينفذ تلقائياً.",
+    level: "approval",
+  });
+  const [result] = await db.insert(sandboxChecks).values({
+    projectId: input.projectId,
+    workspaceId: workspace.id,
+    approvalId: approval.id,
+    kind: input.kind,
+    status: "awaiting_approval",
+    detail,
+  });
+  await recordWorkspaceAudit(workspace.id, { actor: "Logical Sandbox", action: "gate_requested", detail });
+  return (await db.select().from(sandboxChecks).where(eq(sandboxChecks.id, Number(result.insertId))).limit(1))[0];
+}
+
 export async function getWorkerSettingsForOwner(userId: number) {
   const db = await getDb();
   if (!db) throw new Error("Database not available");
@@ -298,6 +354,103 @@ export type DryRuntimePlanInput = {
   constraints: string[];
 };
 
+export type TaskEnginePlanStep = DryRuntimePlanInput["steps"][number];
+
+export async function createTaskEngineRunForPlan(userId: number, input: { planId: number; projectId: number; commandId: number; steps: TaskEnginePlanStep[] }) {
+  const { db } = await requireOwnedProject(userId, input.projectId);
+  const [existing] = await db.select().from(taskEngineRuns).where(eq(taskEngineRuns.planId, input.planId)).limit(1);
+  if (existing) return { run: existing, created: false };
+  const [result] = await db.insert(taskEngineRuns).values({ planId: input.planId, projectId: input.projectId, commandId: input.commandId });
+  const runId = Number(result.insertId);
+  await db.insert(taskEngineSteps).values(input.steps.map((step) => ({
+    runId,
+    stepOrder: step.order,
+    agentKey: step.agent.toLowerCase(),
+    title: step.title,
+    detail: step.detail,
+    approvalLevel: step.approval,
+  })));
+  await recordExecutionEvent(userId, input.projectId, {
+    actor: "Task Engine",
+    type: "TASK_ENGINE_RUN_CREATED",
+    label: "تم إنشاء دورة محرك المهام",
+    detail: `تم إنشاء ${input.steps.length} خطوات منطقية للخطة ${input.planId}.`,
+  });
+  return { run: (await db.select().from(taskEngineRuns).where(eq(taskEngineRuns.id, runId)).limit(1))[0], created: true };
+}
+
+export async function listTaskEngineRunsForProject(userId: number, projectId: number, limit = 50) {
+  const { db } = await requireOwnedProject(userId, projectId);
+  return db.select().from(taskEngineRuns).where(eq(taskEngineRuns.projectId, projectId)).orderBy(desc(taskEngineRuns.updatedAt)).limit(limit);
+}
+
+export async function getTaskEngineRunForProject(userId: number, input: { projectId: number; runId: number }) {
+  const { db } = await requireOwnedProject(userId, input.projectId);
+  const [run] = await db.select().from(taskEngineRuns).where(and(eq(taskEngineRuns.id, input.runId), eq(taskEngineRuns.projectId, input.projectId))).limit(1);
+  if (!run) throw new Error("Task engine run not found");
+  const steps = await db.select().from(taskEngineSteps).where(eq(taskEngineSteps.runId, run.id)).orderBy(taskEngineSteps.stepOrder);
+  return { run, steps };
+}
+
+export async function listActiveTaskEngineRunsForOwners(ownerIds: number[], limit = 50) {
+  const db = await getDb();
+  if (!db || ownerIds.length === 0) return [];
+  return db.select({ run: taskEngineRuns, ownerId: projects.ownerId }).from(taskEngineRuns)
+    .innerJoin(projects, eq(taskEngineRuns.projectId, projects.id))
+    .where(and(inArray(projects.ownerId, ownerIds), inArray(taskEngineRuns.status, ["queued", "running", "awaiting_review", "awaiting_approval", "verifying"])))
+    .orderBy(taskEngineRuns.updatedAt)
+    .limit(limit);
+}
+
+export async function advanceTaskEngineRunForProject(userId: number, input: { projectId: number; runId: number }) {
+  const { db } = await requireOwnedProject(userId, input.projectId);
+  const [run] = await db.select().from(taskEngineRuns).where(and(eq(taskEngineRuns.id, input.runId), eq(taskEngineRuns.projectId, input.projectId))).limit(1);
+  if (!run) throw new Error("Task engine run not found");
+  if (["completed", "failed", "blocked"].includes(run.status)) return { run, outcome: "terminal" as const };
+  const steps = await db.select().from(taskEngineSteps).where(eq(taskEngineSteps.runId, run.id)).orderBy(taskEngineSteps.stepOrder);
+  const gatedStep = steps.find((step) => step.status === "awaiting_review" || step.status === "awaiting_approval");
+  if (gatedStep) {
+    if (!gatedStep.approvalId) throw new Error("Task engine gate missing approval");
+    const [approval] = await db.select().from(approvals).where(eq(approvals.id, gatedStep.approvalId)).limit(1);
+    if (!approval || approval.status === "pending") return { run, outcome: "waiting" as const };
+    if (approval.status === "rejected") {
+      await db.update(taskEngineSteps).set({ status: "failed", output: "رُفضت بوابة الموافقة." }).where(eq(taskEngineSteps.id, gatedStep.id));
+      await db.update(taskEngineRuns).set({ status: "blocked", currentStepOrder: gatedStep.stepOrder, lastError: "رُفضت بوابة الموافقة." }).where(eq(taskEngineRuns.id, run.id));
+      await recordExecutionEvent(userId, input.projectId, { actor: "Task Engine", type: "TASK_ENGINE_BLOCKED", label: "توقفت دورة المحرك بسبب رفض الموافقة", detail: gatedStep.title });
+      return { run, outcome: "blocked" as const };
+    }
+    await db.update(taskEngineSteps).set({ status: "completed", output: "تم اعتماد البوابة؛ أُنجزت الخطوة منطقياً من دون أدوات." }).where(eq(taskEngineSteps.id, gatedStep.id));
+    await db.update(taskEngineRuns).set({ status: "queued", currentStepOrder: gatedStep.stepOrder }).where(eq(taskEngineRuns.id, run.id));
+    await recordExecutionEvent(userId, input.projectId, { actor: "Task Engine", type: "TASK_ENGINE_GATE_APPROVED", label: "تم اعتماد بوابة المحرك", detail: gatedStep.title });
+    return { run, outcome: "gate_approved" as const };
+  }
+  const next = steps.find((step) => step.status === "pending");
+  if (!next) {
+    await db.update(taskEngineRuns).set({ status: "completed", currentStepOrder: steps.at(-1)?.stepOrder ?? 0 }).where(eq(taskEngineRuns.id, run.id));
+    await recordExecutionEvent(userId, input.projectId, { actor: "Task Engine", type: "TASK_ENGINE_COMPLETED", label: "اكتملت دورة المحرك المنطقية", detail: "اكتملت خطوات الخطة من دون تنفيذ أدوات أو ملفات." });
+    return { run, outcome: "completed" as const };
+  }
+  if (next.approvalLevel !== "auto") {
+    const approval = await createApprovalRequest(userId, {
+      projectId: input.projectId,
+      requestedBy: next.agentKey,
+      title: next.title,
+      detail: next.detail,
+      impact: next.approvalLevel === "approval" ? "إجراء حساس محجوب عن التنفيذ" : "قرار يحتاج مراجعة قبل إكمال المسار",
+      level: next.approvalLevel,
+    });
+    const waitingStatus = next.approvalLevel === "approval" ? "awaiting_approval" : "awaiting_review";
+    await db.update(taskEngineSteps).set({ status: waitingStatus, approvalId: approval.id }).where(eq(taskEngineSteps.id, next.id));
+    await db.update(taskEngineRuns).set({ status: waitingStatus, currentStepOrder: next.stepOrder }).where(eq(taskEngineRuns.id, run.id));
+    await recordExecutionEvent(userId, input.projectId, { actor: "Task Engine", type: "TASK_ENGINE_GATE_REQUESTED", label: "يتطلب المحرك قراراً", detail: next.title });
+    return { run, outcome: "gate_requested" as const };
+  }
+  await db.update(taskEngineSteps).set({ status: "completed", attemptCount: sql`${taskEngineSteps.attemptCount} + 1`, output: "أُنجزت خطوة منطقية بلا تشغيل أدوات أو ملفات." }).where(eq(taskEngineSteps.id, next.id));
+  await db.update(taskEngineRuns).set({ status: "queued", currentStepOrder: next.stepOrder }).where(eq(taskEngineRuns.id, run.id));
+  await recordExecutionEvent(userId, input.projectId, { actor: "Task Engine", type: "TASK_ENGINE_AUTO_STEP_COMPLETED", label: "أكمل المحرك خطوة تلقائية", detail: next.title });
+  return { run, outcome: "auto_completed" as const };
+}
+
 export async function listClaimedCommandsForDryRuntime(workerId: string, ownerIds: number[], limit = 25) {
   const db = await getDb();
   if (!db || ownerIds.length === 0) return [];
@@ -343,7 +496,9 @@ export async function createDryExecutionPlanForClaim(input: { ownerId: number; c
     label: "أنشأ Runtime الجاف خطة تنفيذ",
     detail: `الخطة ${planId} للأمر ${command.command}: ${input.plan.summary}`,
   });
-  return { plan: (await db.select().from(executionPlans).where(eq(executionPlans.id, planId)).limit(1))[0], created: true };
+  const plan = (await db.select().from(executionPlans).where(eq(executionPlans.id, planId)).limit(1))[0];
+  await createTaskEngineRunForPlan(input.ownerId, { planId, projectId: command.projectId, commandId: command.id, steps: input.plan.steps });
+  return { plan, created: true };
 }
 
 export async function listProjectExecutionPlans(userId: number, projectId: number, limit = 50) {

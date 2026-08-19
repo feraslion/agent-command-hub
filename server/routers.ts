@@ -107,6 +107,16 @@ export const appRouter = router({
   runtime: router({
     listPlans: protectedProcedure.input(projectIdInput.extend({ limit: z.number().int().min(1).max(100).optional() })).query(({ ctx, input }) => db.listProjectExecutionPlans(ctx.user.id, input.projectId, input.limit ?? 50)),
   }),
+  engine: router({
+    listRuns: protectedProcedure.input(projectIdInput.extend({ limit: z.number().int().min(1).max(100).optional() })).query(({ ctx, input }) => db.listTaskEngineRunsForProject(ctx.user.id, input.projectId, input.limit ?? 50)),
+    getRun: protectedProcedure.input(projectIdInput.extend({ runId: z.number().int().positive() })).query(({ ctx, input }) => db.getTaskEngineRunForProject(ctx.user.id, input)),
+    advance: protectedProcedure.input(projectIdInput.extend({ runId: z.number().int().positive() })).mutation(({ ctx, input }) => db.advanceTaskEngineRunForProject(ctx.user.id, input)),
+  }),
+  sandbox: router({
+    list: protectedProcedure.input(projectIdInput.extend({ limit: z.number().int().min(1).max(100).optional() })).query(({ ctx, input }) => db.listSandboxChecksForProject(ctx.user.id, input.projectId, input.limit ?? 50)),
+    check: protectedProcedure.input(projectIdInput.extend({ kind: z.enum(["workspace_policy", "logical_test"]), engineRunId: z.number().int().positive().optional() })).mutation(({ ctx, input }) => db.runLogicalSandboxCheckForProject(ctx.user.id, input)),
+    requestGate: protectedProcedure.input(projectIdInput.extend({ kind: z.enum(["git_gate", "publish_gate", "delete_gate"]) })).mutation(({ ctx, input }) => db.requestSandboxGateForProject(ctx.user.id, input)),
+  }),
   events: router({
     list: protectedProcedure.input(projectIdInput.extend({ limit: z.number().int().min(1).max(200).optional() })).query(({ ctx, input }) => db.listProjectEvents(ctx.user.id, input.projectId, input.limit ?? 50)),
   }),

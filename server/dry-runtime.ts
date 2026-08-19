@@ -1,5 +1,6 @@
 import * as runtimeDb from "./db";
 import type { DryRuntimePlanInput } from "./db";
+import { runTaskEngineForOwners } from "./task-engine";
 
 type ClaimedCommand = {
   id: number;
@@ -10,6 +11,7 @@ type ClaimedCommand = {
 };
 
 type RuntimeOperations = Pick<typeof runtimeDb, "createDryExecutionPlanForClaim" | "listClaimedCommandsForDryRuntime" | "renewDryCommandLease">;
+type EngineRunner = (ownerIds: number[]) => Promise<{ advancedCount: number }>;
 
 export type DryRuntimeTickResult = {
   createdPlanCount: number;
@@ -61,7 +63,7 @@ export function buildDryRuntimePlan(command: ClaimedCommand): DryRuntimePlanInpu
   };
 }
 
-export async function runDryRuntimeTick(workerId: string, ownerIds: number[], operations: RuntimeOperations = runtimeDb): Promise<DryRuntimeTickResult> {
+export async function runDryRuntimeTick(workerId: string, ownerIds: number[], operations: RuntimeOperations = runtimeDb, runEngine: EngineRunner = runTaskEngineForOwners): Promise<DryRuntimeTickResult> {
   const claims = await operations.listClaimedCommandsForDryRuntime(workerId, ownerIds);
   let createdPlanCount = 0;
   for (const claim of claims) {
@@ -74,5 +76,6 @@ export async function runDryRuntimeTick(workerId: string, ownerIds: number[], op
     await operations.renewDryCommandLease(claim.command.id, workerId);
     if (result.created) createdPlanCount += 1;
   }
+  await runEngine(ownerIds);
   return { createdPlanCount, observedClaimCount: claims.length };
 }

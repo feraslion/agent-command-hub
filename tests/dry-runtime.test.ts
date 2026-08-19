@@ -16,11 +16,13 @@ describe("Runtime الجاف", () => {
       createDryExecutionPlanForClaim: vi.fn().mockResolvedValue({ created: true, plan: { id: 9 } }),
       renewDryCommandLease: vi.fn().mockResolvedValue(true),
     };
+    const runEngine = vi.fn().mockResolvedValue({ advancedCount: 1 });
 
-    const result = await runDryRuntimeTick("dry-worker-test", [11], operations);
+    const result = await runDryRuntimeTick("dry-worker-test", [11], operations, runEngine);
 
     expect(operations.createDryExecutionPlanForClaim).toHaveBeenCalledWith(expect.objectContaining({ ownerId: 11, commandId: 71, workerId: "dry-worker-test" }));
     expect(operations.renewDryCommandLease).toHaveBeenCalledWith(71, "dry-worker-test");
+    expect(runEngine).toHaveBeenCalledWith([11]);
     expect(result).toEqual({ observedClaimCount: 1, createdPlanCount: 1 });
   });
 });

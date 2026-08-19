@@ -23,6 +23,10 @@ export const executionPlanStatusValues = ["ready", "blocked", "superseded"] as c
 export const workerRuntimeStatusValues = ["disabled", "awaiting_service", "ready", "offline"] as const;
 export const workspaceStatusValues = ["active", "archived"] as const;
 export const workspaceAuditActionValues = ["workspace_created", "file_read", "file_written", "path_rejected", "tool_rejected", "sandbox_checked", "gate_requested"] as const;
+export const taskEngineRunStatusValues = ["queued", "running", "awaiting_review", "awaiting_approval", "verifying", "completed", "failed", "blocked"] as const;
+export const taskEngineStepStatusValues = ["pending", "running", "awaiting_review", "awaiting_approval", "completed", "failed", "skipped"] as const;
+export const sandboxCheckKindValues = ["workspace_policy", "logical_test", "git_gate", "publish_gate", "delete_gate"] as const;
+export const sandboxCheckStatusValues = ["passed", "blocked", "awaiting_approval", "rejected"] as const;
 
 export const projects = mysqlTable("projects", {
   id: int("id").autoincrement().primaryKey(),
@@ -190,6 +194,57 @@ export const workspaceAuditLogs = mysqlTable("workspace_audit_logs", {
   createdAt: timestamp("created_at").defaultNow().notNull(),
 }, (table) => [
   index("workspace_audit_workspace_created_idx").on(table.workspaceId, table.createdAt),
+]);
+
+export const taskEngineRuns = mysqlTable("task_engine_runs", {
+  id: int("id").autoincrement().primaryKey(),
+  planId: int("plan_id").notNull().references(() => executionPlans.id, { onDelete: "cascade" }),
+  projectId: int("project_id").notNull().references(() => projects.id, { onDelete: "cascade" }),
+  commandId: int("command_id").notNull().references(() => executionCommands.id, { onDelete: "cascade" }),
+  status: mysqlEnum("status", taskEngineRunStatusValues).default("queued").notNull(),
+  currentStepOrder: int("current_step_order").default(0).notNull(),
+  retryCount: int("retry_count").default(0).notNull(),
+  maxRetries: int("max_retries").default(2).notNull(),
+  lastError: text("last_error"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().onUpdateNow().notNull(),
+}, (table) => [
+  uniqueIndex("task_engine_runs_plan_unique").on(table.planId),
+  index("task_engine_runs_project_updated_idx").on(table.projectId, table.updatedAt),
+]);
+
+export const taskEngineSteps = mysqlTable("task_engine_steps", {
+  id: int("id").autoincrement().primaryKey(),
+  runId: int("run_id").notNull().references(() => taskEngineRuns.id, { onDelete: "cascade" }),
+  stepOrder: int("step_order").notNull(),
+  agentKey: varchar("agent_key", { length: 64 }).notNull(),
+  title: varchar("title", { length: 255 }).notNull(),
+  detail: text("detail").notNull(),
+  approvalLevel: mysqlEnum("approval_level", approvalLevelValues).notNull(),
+  approvalId: int("approval_id").references(() => approvals.id, { onDelete: "set null" }),
+  status: mysqlEnum("status", taskEngineStepStatusValues).default("pending").notNull(),
+  attemptCount: int("attempt_count").default(0).notNull(),
+  maxAttempts: int("max_attempts").default(2).notNull(),
+  output: text("output"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().onUpdateNow().notNull(),
+}, (table) => [
+  uniqueIndex("task_engine_steps_run_order_unique").on(table.runId, table.stepOrder),
+  index("task_engine_steps_run_status_idx").on(table.runId, table.status),
+]);
+
+export const sandboxChecks = mysqlTable("sandbox_checks", {
+  id: int("id").autoincrement().primaryKey(),
+  projectId: int("project_id").notNull().references(() => projects.id, { onDelete: "cascade" }),
+  workspaceId: int("workspace_id").references(() => workspaces.id, { onDelete: "set null" }),
+  engineRunId: int("engine_run_id").references(() => taskEngineRuns.id, { onDelete: "set null" }),
+  approvalId: int("approval_id").references(() => approvals.id, { onDelete: "set null" }),
+  kind: mysqlEnum("kind", sandboxCheckKindValues).notNull(),
+  status: mysqlEnum("status", sandboxCheckStatusValues).notNull(),
+  detail: text("detail").notNull(),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+}, (table) => [
+  index("sandbox_checks_project_created_idx").on(table.projectId, table.createdAt),
 ]);
 
 export const workerSettings = mysqlTable("worker_settings", {

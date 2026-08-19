@@ -94,7 +94,15 @@ export default function ProjectsScreen() {
 
 function ProjectCard({ project, wide, colors, onRun, isSubmitting }: { project: { id: number; name: string; code: string; status: keyof typeof statusLabel; progress: number; currentStage: string; updatedAt: Date }; wide: boolean; colors: ReturnType<typeof useColors>; onRun: () => void; isSubmitting: boolean }) {
   const plansQuery = trpc.runtime.listPlans.useQuery({ projectId: project.id, limit: 1 }, { refetchInterval: 10_000 });
+  const engineQuery = trpc.engine.listRuns.useQuery({ projectId: project.id, limit: 1 }, { refetchInterval: 10_000 });
+  const sandboxQuery = trpc.sandbox.list.useQuery({ projectId: project.id, limit: 1 }, { refetchInterval: 10_000 });
+  const utils = trpc.useUtils();
+  const engineAdvance = trpc.engine.advance.useMutation({ onSuccess: () => utils.engine.listRuns.invalidate({ projectId: project.id }) });
+  const sandboxCheck = trpc.sandbox.check.useMutation({ onSuccess: () => utils.sandbox.list.invalidate({ projectId: project.id }) });
+  const sandboxGate = trpc.sandbox.requestGate.useMutation({ onSuccess: () => utils.sandbox.list.invalidate({ projectId: project.id }) });
   const latestPlan = plansQuery.data?.[0];
+  const latestEngineRun = engineQuery.data?.[0];
+  const latestSandboxCheck = sandboxQuery.data?.[0];
   const stepCount = latestPlan ? readPlanStepCount(latestPlan.steps) : 0;
   return (
     <View style={[styles.card, wide && styles.cardWide, { backgroundColor: colors.surface, borderColor: colors.border }]}>
@@ -107,6 +115,10 @@ function ProjectCard({ project, wide, colors, onRun, isSubmitting }: { project: 
       <View style={[styles.progressTrack, { backgroundColor: colors.subtle }]}><View style={[styles.progressFill, { width: `${project.progress}%`, backgroundColor: colors.primary }]} /></View>
       <View style={styles.cardBottom}><Text style={[styles.updated, { color: colors.muted }]}>{formatUpdatedAt(project.updatedAt)}</Text><Text style={[styles.progressLabel, { color: colors.foreground }]}>{project.progress}% مكتمل</Text></View>
       <View style={[styles.runtimeCard, { backgroundColor: colors.subtle, borderColor: colors.border }]}><Text style={[styles.runtimeValue, { color: colors.primary }]}>{latestPlan ? `${stepCount} خطوات · ${runtimePlanStatusLabel(latestPlan.status)}` : "بانتظار أمر محجوز"}</Text><Text style={[styles.runtimeLabel, { color: colors.muted }]}>Runtime الجاف</Text></View>
+      <View style={[styles.runtimeCard, { backgroundColor: colors.subtle, borderColor: colors.border }]}><Text style={[styles.runtimeValue, { color: colors.primary }]}>{latestEngineRun ? `الخطوة ${latestEngineRun.currentStepOrder} · ${taskEngineStatusLabel(latestEngineRun.status)}` : "يتولد بعد تجهيز الخطة"}</Text><Text style={[styles.runtimeLabel, { color: colors.muted }]}>Task Engine</Text></View>
+      {latestEngineRun && !["completed", "failed", "blocked"].includes(latestEngineRun.status) ? <Pressable disabled={engineAdvance.isPending} onPress={() => engineAdvance.mutate({ projectId: project.id, runId: latestEngineRun.id })} style={({ pressed }) => [styles.engineButton, { borderColor: colors.border }, (pressed || engineAdvance.isPending) && styles.pressed]}><Text style={[styles.engineButtonText, { color: colors.primary }]}>{engineAdvance.isPending ? "جارٍ تحديث المحرك…" : "تحديث خطوة المحرك"}</Text></Pressable> : null}
+      <View style={[styles.runtimeCard, { backgroundColor: colors.subtle, borderColor: colors.border }]}><Text style={[styles.runtimeValue, { color: colors.primary }]}>{latestSandboxCheck ? sandboxStatusLabel(latestSandboxCheck.status) : "لم يُشغّل بعد"}</Text><Text style={[styles.runtimeLabel, { color: colors.muted }]}>Sandbox المنطقية</Text></View>
+      <View style={styles.sandboxActions}><Pressable disabled={sandboxCheck.isPending} onPress={() => sandboxCheck.mutate({ projectId: project.id, kind: "logical_test", engineRunId: latestEngineRun?.id })} style={({ pressed }) => [styles.sandboxAction, { borderColor: colors.border }, (pressed || sandboxCheck.isPending) && styles.pressed]}><Text style={[styles.engineButtonText, { color: colors.primary }]}>{sandboxCheck.isPending ? "جارٍ الفحص…" : "فحص منطقي"}</Text></Pressable><Pressable disabled={sandboxGate.isPending} onPress={() => sandboxGate.mutate({ projectId: project.id, kind: "publish_gate" })} style={({ pressed }) => [styles.sandboxAction, { borderColor: colors.border }, (pressed || sandboxGate.isPending) && styles.pressed]}><Text style={[styles.engineButtonText, { color: colors.primary }]}>{sandboxGate.isPending ? "جارٍ الطلب…" : "بوابة نشر"}</Text></Pressable></View>
       <Pressable disabled={isSubmitting} onPress={onRun} style={({ pressed }) => [styles.runButton, { backgroundColor: colors.primary }, (pressed || isSubmitting) && styles.pressed]}><Text style={styles.runButtonText}>{isSubmitting ? "جارٍ إرسال الأمر…" : "إرسال إلى العامل"}</Text><Text style={styles.runArrow}>←</Text></Pressable>
     </View>
   );
@@ -128,6 +140,22 @@ function readPlanStepCount(serializedSteps: string) {
 
 function runtimePlanStatusLabel(status: "ready" | "blocked" | "superseded") {
   return status === "ready" ? "خطة جاهزة" : status === "blocked" ? "تحتاج مراجعة" : "تم استبدالها";
+}
+
+function taskEngineStatusLabel(status: "queued" | "running" | "awaiting_review" | "awaiting_approval" | "verifying" | "completed" | "failed" | "blocked") {
+  if (status === "awaiting_review") return "بانتظار مراجعة";
+  if (status === "awaiting_approval") return "بانتظار موافقة";
+  if (status === "completed") return "مكتمل منطقياً";
+  if (status === "blocked") return "محجوب";
+  if (status === "failed") return "فشل";
+  if (status === "verifying") return "قيد التحقق";
+  return status === "running" ? "قيد المعالجة" : "في الانتظار";
+}
+
+function sandboxStatusLabel(status: "passed" | "blocked" | "awaiting_approval" | "rejected") {
+  if (status === "passed") return "فحص ناجح";
+  if (status === "awaiting_approval") return "بانتظار موافقة";
+  return status === "rejected" ? "طلب مرفوض" : "محجوبة";
 }
 
 const styles = StyleSheet.create({
@@ -158,6 +186,10 @@ const styles = StyleSheet.create({
   runtimeCard: { borderRadius: 12, borderWidth: 1, flexDirection: "row-reverse", justifyContent: "space-between", marginTop: 14, paddingHorizontal: 11, paddingVertical: 10 },
   runtimeLabel: { fontSize: 11, fontWeight: "800" },
   runtimeValue: { fontSize: 11, fontWeight: "900" },
+  engineButton: { alignItems: "center", borderRadius: 11, borderWidth: 1, marginTop: 9, paddingVertical: 9 },
+  engineButtonText: { fontSize: 12, fontWeight: "900" },
+  sandboxActions: { flexDirection: "row-reverse", gap: 8, marginTop: 9 },
+  sandboxAction: { alignItems: "center", borderRadius: 11, borderWidth: 1, flex: 1, paddingVertical: 9 },
   runButton: { alignItems: "center", borderRadius: 13, flexDirection: "row-reverse", justifyContent: "space-between", marginTop: 15, minHeight: 44, paddingHorizontal: 14 },
   runButtonText: { color: "#FFFFFF", fontSize: 13, fontWeight: "900" },
   runArrow: { color: "#FFFFFF", fontSize: 17 },

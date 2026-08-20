@@ -1,3 +1,4 @@
+import { createHash, randomBytes } from "node:crypto";
 import { and, desc, eq, inArray, lt, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/mysql2";
 import {
@@ -9,6 +10,7 @@ import {
   executionEvents,
   executionPlans,
   isolatedRuntimeRequests,
+  localRunners,
   projects,
   sandboxChecks,
   sensitiveWorkspaceChanges,
@@ -30,6 +32,7 @@ import { ENV } from "./_core/env";
 import { sandboxGateDetail, sandboxGateKinds, sandboxGateTitle } from "./sandbox-policy";
 import { assessSensitiveWorkspaceChange } from "../lib/sensitive-workspace-policy";
 import { assertWorkspaceContent, normalizeWorkspacePath, WorkspacePathError } from "./workspace-policy";
+import { assertLocalRunnerExecutable, truncateRunnerOutput } from "./local-runner-policy";
 
 let _db: ReturnType<typeof drizzle> | null = null;
 
@@ -322,16 +325,201 @@ export async function requestSandboxGateForProject(userId: number, input: { proj
   return (await db.select().from(sandboxChecks).where(eq(sandboxChecks.id, Number(result.insertId))).limit(1))[0];
 }
 
-export const isolatedRuntimeEnvironment = {
-  status: "environment_required" as const,
-  canExecuteUserCode: false,
-  label: "بيئة نظام تشغيل معزولة غير مهيأة",
-  detail: "لا تسمح الاستضافة الحالية بتشغيل شيفرة المستخدم أو Docker من التطبيق. يبقى الطلب مسجلاً ومحجوباً حتى ربط عامل ببيئة معزولة معتمدة.",
-};
+const localRunnerHeartbeatWindowMs = 30_000;
+
+function hashRunnerToken(token: string) {
+  return createHash("sha256").update(token).digest("hex");
+}
+
+function isRunnerFresh(lastHeartbeatAt: Date | null) {
+  return Boolean(lastHeartbeatAt && Date.now() - new Date(lastHeartbeatAt).getTime() <= localRunnerHeartbeatWindowMs);
+}
+
+function runnerProfiles(capabilities: string | null) {
+  try {
+    const parsed = JSON.parse(capabilities ?? "{}") as { profiles?: unknown };
+    return Array.isArray(parsed.profiles) ? parsed.profiles.filter((value): value is string => typeof value === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+function supportsRunnerProfile(runner: typeof localRunners.$inferSelect, profile: string) {
+  return runnerProfiles(runner.capabilities).includes(profile);
+}
+
+function publicRunner(runner: typeof localRunners.$inferSelect) {
+  return {
+    id: runner.id,
+    runnerKey: runner.runnerKey,
+    label: runner.label,
+    status: runner.status === "revoked" ? "revoked" : isRunnerFresh(runner.lastHeartbeatAt) ? runner.status : "offline",
+    capabilities: runner.capabilities,
+    lastHeartbeatAt: runner.lastHeartbeatAt,
+    createdAt: runner.createdAt,
+    updatedAt: runner.updatedAt,
+  };
+}
+
+export async function listLocalRunnersForOwner(userId: number) {
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+  const runners = await db.select().from(localRunners).where(eq(localRunners.ownerId, userId)).orderBy(desc(localRunners.updatedAt));
+  return runners.map(publicRunner);
+}
+
+export async function createLocalRunnerPairingForOwner(userId: number, label: string) {
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+  const runnerKey = `runner-${randomBytes(6).toString("hex")}`;
+  const token = randomBytes(32).toString("base64url");
+  const [result] = await db.insert(localRunners).values({
+    ownerId: userId,
+    runnerKey,
+    label,
+    tokenHash: hashRunnerToken(token),
+  });
+  const [runner] = await db.select().from(localRunners).where(eq(localRunners.id, Number(result.insertId))).limit(1);
+  return { runner: publicRunner(runner), token };
+}
+
+export async function revokeLocalRunnerForOwner(userId: number, runnerId: number) {
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+  const [runner] = await db.select().from(localRunners).where(and(eq(localRunners.id, runnerId), eq(localRunners.ownerId, userId))).limit(1);
+  if (!runner) throw new Error("Local runner not found");
+  await db.update(localRunners).set({ status: "revoked", revokedAt: new Date(), tokenHash: hashRunnerToken(randomBytes(32).toString("base64url")) }).where(eq(localRunners.id, runner.id));
+  return (await listLocalRunnersForOwner(userId)).find((candidate) => candidate.id === runnerId);
+}
+
+export async function getIsolatedRuntimeStatusForOwner(userId: number) {
+  const runners = await listLocalRunnersForOwner(userId);
+  const readyRunner = runners.find((runner) => runner.status === "ready");
+  if (readyRunner) {
+    return {
+      status: "ready" as const,
+      canExecuteUserCode: true,
+      label: "Runner محلي متصل وجاهز",
+      detail: `يتصل ${readyRunner.label} ببيئة Docker مقيدة. التنفيذ يقتصر على JavaScript المستقل بعد موافقة صريحة.`,
+      runner: readyRunner,
+    };
+  }
+  return {
+    status: "environment_required" as const,
+    canExecuteUserCode: false,
+    label: "Runner محلي غير متصل",
+    detail: "اربط Runner محلياً في الإعدادات وشغله على جهاز يملك Docker. لن ينفذ التطبيق شيفرة أو أدوات حتى يصل heartbeat صالح.",
+    runner: null,
+  };
+}
+
+export async function authenticateLocalRunner(input: { runnerKey: string; token: string }) {
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+  const [runner] = await db.select().from(localRunners).where(and(
+    eq(localRunners.runnerKey, input.runnerKey),
+    eq(localRunners.tokenHash, hashRunnerToken(input.token)),
+  )).limit(1);
+  if (!runner || runner.status === "revoked") throw new Error("Local runner credentials are invalid or revoked");
+  return runner;
+}
+
+export async function heartbeatLocalRunner(input: { runnerKey: string; token: string; capabilities?: Record<string, unknown> }) {
+  const runner = await authenticateLocalRunner(input);
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+  await db.update(localRunners).set({
+    status: "ready",
+    capabilities: input.capabilities ? JSON.stringify(input.capabilities) : runner.capabilities,
+    lastHeartbeatAt: new Date(),
+  }).where(eq(localRunners.id, runner.id));
+  return (await db.select().from(localRunners).where(eq(localRunners.id, runner.id)).limit(1))[0];
+}
+
+export async function claimLocalRuntimeRequest(input: { runnerKey: string; token: string }) {
+  const runner = await heartbeatLocalRunner(input);
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+  const [candidate] = await db.select().from(isolatedRuntimeRequests).where(and(
+    eq(isolatedRuntimeRequests.runnerId, runner.id),
+    eq(isolatedRuntimeRequests.status, "queued"),
+  )).orderBy(isolatedRuntimeRequests.createdAt).limit(1);
+  if (!candidate) return null;
+  const [claim] = await db.update(isolatedRuntimeRequests).set({ status: "claimed", claimedAt: new Date() }).where(and(
+    eq(isolatedRuntimeRequests.id, candidate.id),
+    eq(isolatedRuntimeRequests.status, "queued"),
+  ));
+  if (Number(claim.affectedRows ?? 0) !== 1) return null;
+  const [file] = await db.select({ content: workspaceFiles.content }).from(workspaceFiles).where(and(
+    eq(workspaceFiles.workspaceId, candidate.workspaceId),
+    eq(workspaceFiles.path, candidate.targetPath),
+  )).limit(1);
+  if (!file) {
+    await db.update(isolatedRuntimeRequests).set({ status: "failed", reason: "تعذر العثور على ملف Workspace عند الحجز.", completedAt: new Date() }).where(eq(isolatedRuntimeRequests.id, candidate.id));
+    throw new Error("Workspace file no longer exists");
+  }
+  let executable: ReturnType<typeof assertLocalRunnerExecutable>;
+  try {
+    executable = assertLocalRunnerExecutable(candidate.targetPath, file.content);
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : "رفضت سياسة Runner محتوى الملف بعد الحجز.";
+    await db.update(isolatedRuntimeRequests).set({ status: "failed", reason: detail, completedAt: new Date() }).where(eq(isolatedRuntimeRequests.id, candidate.id));
+    await recordWorkspaceAudit(candidate.workspaceId, { actor: runner.runnerKey, action: "tool_rejected", path: candidate.targetPath, detail });
+    await recordExecutionEvent(runner.ownerId, candidate.projectId, { actor: runner.runnerKey, type: "ISOLATED_RUNTIME_POLICY_REJECTED", label: "رفض Runner طلب تنفيذ بعد الحجز", detail: candidate.targetPath });
+    throw error;
+  }
+  await db.update(localRunners).set({ status: "busy", lastHeartbeatAt: new Date() }).where(eq(localRunners.id, runner.id));
+  await recordWorkspaceAudit(candidate.workspaceId, { actor: runner.runnerKey, action: "sandbox_checked", path: candidate.targetPath, detail: "حجز Runner محلي طلباً معتمداً للتنفيذ داخل حاوية مقيدة." });
+  await recordExecutionEvent(runner.ownerId, candidate.projectId, { actor: runner.runnerKey, type: "ISOLATED_RUNTIME_CLAIMED", label: "حجز Runner محلي طلب تنفيذ", detail: candidate.targetPath });
+  return { requestId: candidate.id, targetPath: executable.normalizedPath, profile: executable.profile, content: file.content };
+}
+
+export async function reportLocalRuntimeRequest(input: { runnerKey: string; token: string; requestId: number; status: "completed" | "failed"; exitCode: number; stdout?: string; stderr?: string; durationMs: number }) {
+  const runner = await authenticateLocalRunner(input);
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+  const [request] = await db.select().from(isolatedRuntimeRequests).where(and(
+    eq(isolatedRuntimeRequests.id, input.requestId),
+    eq(isolatedRuntimeRequests.runnerId, runner.id),
+    eq(isolatedRuntimeRequests.status, "claimed"),
+  )).limit(1);
+  if (!request) throw new Error("Runtime request is not claimed by this runner");
+  const status = input.status === "completed" && input.exitCode === 0 ? "completed" : "failed" as const;
+  const stdout = truncateRunnerOutput(input.stdout ?? "", 8_000);
+  const stderr = truncateRunnerOutput(input.stderr ?? "", 8_000);
+  await db.update(isolatedRuntimeRequests).set({
+    status,
+    exitCode: input.exitCode,
+    stdout,
+    stderr,
+    durationMs: Math.max(0, Math.min(input.durationMs, 60_000)),
+    reason: status === "completed" ? "اكتمل التنفيذ المحدود داخل Runner المحلي." : "أعاد Runner المحلي نتيجة فشل أو رمز خروج غير صفري.",
+    completedAt: new Date(),
+  }).where(eq(isolatedRuntimeRequests.id, request.id));
+  await db.update(localRunners).set({ status: "ready", lastHeartbeatAt: new Date() }).where(eq(localRunners.id, runner.id));
+  await recordWorkspaceAudit(request.workspaceId, { actor: runner.runnerKey, action: "sandbox_checked", path: request.targetPath, detail: status === "completed" ? "اكتمل التنفيذ المحدود داخل الحاوية بنجاح." : "انتهى التنفيذ المحدود داخل الحاوية بفشل؛ راجع المخرجات المقتطعة." });
+  await recordExecutionEvent(runner.ownerId, request.projectId, { actor: runner.runnerKey, type: status === "completed" ? "ISOLATED_RUNTIME_COMPLETED" : "ISOLATED_RUNTIME_FAILED", label: status === "completed" ? "اكتمل تنفيذ معزول" : "فشل تنفيذ معزول", detail: `${request.targetPath} · exit ${input.exitCode}` });
+  return (await db.select().from(isolatedRuntimeRequests).where(eq(isolatedRuntimeRequests.id, request.id)).limit(1))[0];
+}
 
 export async function listIsolatedRuntimeRequestsForProject(userId: number, projectId: number, limit = 50) {
   const { db } = await requireOwnedProject(userId, projectId);
   return db.select().from(isolatedRuntimeRequests).where(eq(isolatedRuntimeRequests.projectId, projectId)).orderBy(desc(isolatedRuntimeRequests.createdAt)).limit(limit);
+}
+
+export async function listOwnerIsolatedRuntimeRequests(userId: number, limit = 50) {
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+  return db.select({
+    request: isolatedRuntimeRequests,
+    project: { id: projects.id, name: projects.name, code: projects.code },
+    runner: { id: localRunners.id, label: localRunners.label, runnerKey: localRunners.runnerKey },
+  }).from(isolatedRuntimeRequests)
+    .innerJoin(projects, eq(isolatedRuntimeRequests.projectId, projects.id))
+    .leftJoin(localRunners, eq(isolatedRuntimeRequests.runnerId, localRunners.id))
+    .where(eq(projects.ownerId, userId))
+    .orderBy(desc(isolatedRuntimeRequests.createdAt))
+    .limit(limit);
 }
 
 export async function requestIsolatedRuntimeExecution(userId: number, input: { projectId: number; targetPath: string; engineRunId?: number }) {
@@ -340,19 +528,51 @@ export async function requestIsolatedRuntimeExecution(userId: number, input: { p
   const path = normalizeWorkspacePath(input.targetPath);
   const db = await getDb();
   if (!db) throw new Error("Database not available");
-  const [file] = await db.select({ id: workspaceFiles.id }).from(workspaceFiles).where(and(eq(workspaceFiles.workspaceId, workspace.id), eq(workspaceFiles.path, path))).limit(1);
+  const [file] = await db.select({ id: workspaceFiles.id, content: workspaceFiles.content }).from(workspaceFiles).where(and(eq(workspaceFiles.workspaceId, workspace.id), eq(workspaceFiles.path, path))).limit(1);
   if (!file) throw new Error("Workspace file not found");
+  const executable = assertLocalRunnerExecutable(path, file.content);
+  const runners = await db.select().from(localRunners).where(eq(localRunners.ownerId, userId)).orderBy(desc(localRunners.updatedAt));
+  const runner = runners.find((candidate) => candidate.status === "ready" && isRunnerFresh(candidate.lastHeartbeatAt) && supportsRunnerProfile(candidate, executable.profile));
+  if (!runner) {
+    const detail = executable.profile === "typescript_lockfile"
+      ? "لا يوجد Runner محلي متصل يعلن دعم صورة TypeScript المثبتة من lockfile. شغّل العميل المحدث ثم أعد المحاولة."
+      : "اربط Runner محلياً في الإعدادات وشغله على جهاز يملك Docker. لن ينفذ التطبيق شيفرة أو أدوات حتى يصل heartbeat صالح.";
+    const [result] = await db.insert(isolatedRuntimeRequests).values({
+      projectId: input.projectId,
+      workspaceId: workspace.id,
+      engineRunId: input.engineRunId ?? null,
+      requestedByUserId: userId,
+      targetPath: path,
+      profile: executable.profile,
+      status: "environment_required",
+      reason: detail,
+    });
+    await recordWorkspaceAudit(workspace.id, { actor: "Isolated Runtime Gate", action: "tool_rejected", path, detail });
+    await recordExecutionEvent(userId, input.projectId, { actor: "Isolated Runtime Gate", type: "ISOLATED_RUNTIME_RUNNER_REQUIRED", label: "حُجب التنفيذ بانتظار Runner متوافق", detail: path });
+    return (await db.select().from(isolatedRuntimeRequests).where(eq(isolatedRuntimeRequests.id, Number(result.insertId))).limit(1))[0];
+  }
+  const approval = await createApprovalRequest(userId, {
+    projectId: input.projectId,
+    requestedBy: "Isolated Runtime Gate",
+    title: `تنفيذ معزول للملف ${path}`,
+    detail: `سيشغّل Runner المحلي ${runner.label} ملف ${executable.profile === "typescript_lockfile" ? "TypeScript مستقلاً من صورة مقيدة مثبتة بـ lockfile" : "JavaScript مستقلاً"} داخل حاوية بلا شبكة وبحدود 15 ثانية و256MB.`,
+    impact: "تنفيذ شيفرة داخل بيئة Docker محلية مقيدة بعد اعتماد صريح.",
+    level: "approval",
+  });
   const [result] = await db.insert(isolatedRuntimeRequests).values({
     projectId: input.projectId,
     workspaceId: workspace.id,
     engineRunId: input.engineRunId ?? null,
     requestedByUserId: userId,
+    approvalId: approval.id,
+    runnerId: runner.id,
     targetPath: path,
-    status: "environment_required",
-    reason: isolatedRuntimeEnvironment.detail,
+    profile: executable.profile,
+    status: "awaiting_approval",
+    reason: "ينتظر موافقة صريحة قبل إتاحة الطلب إلى Runner المحلي.",
   });
-  await recordWorkspaceAudit(workspace.id, { actor: "Isolated Runtime Gate", action: "tool_rejected", path, detail: "تم تسجيل طلب تنفيذ شيفرة، لكنه محجوب إلى أن تتوفر بيئة نظام تشغيل معزولة معتمدة." });
-  await recordExecutionEvent(userId, input.projectId, { actor: "Isolated Runtime Gate", type: "ISOLATED_RUNTIME_BLOCKED", label: "حُجب تنفيذ الشيفرة بانتظار البيئة المعزولة", detail: path });
+  await recordWorkspaceAudit(workspace.id, { actor: "Isolated Runtime Gate", action: "gate_requested", path, detail: "أُنشئ طلب موافقة لتنفيذ محدود عبر Runner محلي؛ لم تُشغّل شيفرة بعد." });
+  await recordExecutionEvent(userId, input.projectId, { actor: "Isolated Runtime Gate", type: "ISOLATED_RUNTIME_APPROVAL_REQUESTED", label: "طلب موافقة لتنفيذ معزول", detail: path });
   return (await db.select().from(isolatedRuntimeRequests).where(eq(isolatedRuntimeRequests.id, Number(result.insertId))).limit(1))[0];
 }
 
@@ -844,9 +1064,24 @@ export async function resolveApproval(userId: number, input: { projectId: number
     detail: approval.title,
   });
   const sensitiveChangeTransition = await applyResolvedSensitiveWorkspaceChange(userId, input.projectId, input.approvalId, input.decision);
+  const [runtimeRequest] = await db.select().from(isolatedRuntimeRequests).where(and(
+    eq(isolatedRuntimeRequests.projectId, input.projectId),
+    eq(isolatedRuntimeRequests.approvalId, input.approvalId),
+  )).limit(1);
+  let runtimeTransition: { status: "queued" | "blocked"; requestId: number } | null = null;
+  if (runtimeRequest && runtimeRequest.status === "awaiting_approval") {
+    const status = input.decision === "approved" ? "queued" : "blocked" as const;
+    await db.update(isolatedRuntimeRequests).set({
+      status,
+      reason: input.decision === "approved" ? "اعتمد المالك التنفيذ؛ أصبح الطلب متاحاً إلى Runner المحلي المحدد." : "رفض المالك تنفيذ الشيفرة؛ بقي الطلب محجوباً.",
+    }).where(eq(isolatedRuntimeRequests.id, runtimeRequest.id));
+    await recordWorkspaceAudit(runtimeRequest.workspaceId, { actor: "Isolated Runtime Gate", action: input.decision === "approved" ? "gate_requested" : "tool_rejected", path: runtimeRequest.targetPath, detail: input.decision === "approved" ? "اعتمد المالك التنفيذ؛ ينتظر Runner المحلي." : "رفض المالك التنفيذ؛ لم تشغّل الشيفرة." });
+    await recordExecutionEvent(userId, input.projectId, { actor: "Isolated Runtime Gate", type: input.decision === "approved" ? "ISOLATED_RUNTIME_QUEUED" : "ISOLATED_RUNTIME_REJECTED", label: input.decision === "approved" ? "وضع التنفيذ المعزول في الطابور" : "رُفض التنفيذ المعزول", detail: runtimeRequest.targetPath });
+    runtimeTransition = { status, requestId: runtimeRequest.id };
+  }
   const [engineStep] = await db.select().from(taskEngineSteps).where(eq(taskEngineSteps.approvalId, input.approvalId)).limit(1);
   const engineTransition = engineStep ? await advanceTaskEngineRunForProject(userId, { projectId: input.projectId, runId: engineStep.runId }) : null;
-  return { approval: (await db.select().from(approvals).where(eq(approvals.id, input.approvalId)).limit(1))[0], engineTransition, sensitiveChangeTransition };
+  return { approval: (await db.select().from(approvals).where(eq(approvals.id, input.approvalId)).limit(1))[0], engineTransition, sensitiveChangeTransition, runtimeTransition };
 }
 
 export async function getProjectCostSummary(userId: number, projectId: number) {

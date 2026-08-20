@@ -1,0 +1,9 @@
+FROM node:22-alpine
+
+WORKDIR /runtime
+COPY typescript-package.json package.json
+COPY typescript-package-lock.json package-lock.json
+RUN npm ci --ignore-scripts --omit=dev --no-audit --no-fund \
+  && chmod -R a+rX /runtime/node_modules
+
+USER 1000:1000

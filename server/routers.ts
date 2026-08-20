@@ -145,6 +145,9 @@ export const appRouter = router({
     createPairing: protectedProcedure.input(z.object({ label: z.string().trim().min(2).max(128) })).mutation(({ ctx, input }) => db.createLocalRunnerPairingForOwner(ctx.user.id, input.label)),
     revoke: protectedProcedure.input(z.object({ runnerId: z.number().int().positive() })).mutation(({ ctx, input }) => db.revokeLocalRunnerForOwner(ctx.user.id, input.runnerId)),
   }),
+  operationalHealth: router({
+    get: protectedProcedure.query(({ ctx }) => db.getOwnerOperationalHealth(ctx.user.id)),
+  }),
   approvals: router({
     list: protectedProcedure.input(projectIdInput).query(({ ctx, input }) => db.listProjectApprovals(ctx.user.id, input.projectId)),
     inbox: protectedProcedure.input(z.object({ limit: z.number().int().min(1).max(200).optional() }).optional()).query(({ ctx, input }) => db.listOwnerApprovalsWithEngineContext(ctx.user.id, input?.limit ?? 100)),

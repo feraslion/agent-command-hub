@@ -36,6 +36,12 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Scan source for credential-like literals
+        run: pnpm security:secrets
+
+      - name: Block critical production dependency advisories
+        run: pnpm audit --prod --audit-level=critical
+
       - name: Check TypeScript
         run: pnpm check
 

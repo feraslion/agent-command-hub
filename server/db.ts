@@ -538,6 +538,33 @@ export async function listOwnerIsolatedRuntimeRequests(userId: number, limit = 5
     .limit(limit);
 }
 
+/** يلخص مؤشرات الصحة من بيانات المالك فقط، ولا يغير أي حالة تشغيلية. */
+export async function getOwnerOperationalHealth(userId: number) {
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+  const since = new Date(Date.now() - 24 * 60 * 60 * 1000);
+  const [runtimeRecords, runners, worker, pendingApprovals, ownedProjects, ownerCosts] = await Promise.all([
+    db.select({ status: isolatedRuntimeRequests.status, createdAt: isolatedRuntimeRequests.createdAt, completedAt: isolatedRuntimeRequests.completedAt }).from(isolatedRuntimeRequests).innerJoin(projects, eq(isolatedRuntimeRequests.projectId, projects.id)).where(eq(projects.ownerId, userId)),
+    listLocalRunnersForOwner(userId),
+    getWorkerSettingsForOwner(userId),
+    db.select({ id: approvals.id }).from(approvals).innerJoin(projects, eq(approvals.projectId, projects.id)).where(and(eq(projects.ownerId, userId), eq(approvals.status, "pending"))),
+    db.select({ id: projects.id, budgetLimit: projects.budgetLimit }).from(projects).where(eq(projects.ownerId, userId)),
+    db.select({ amount: costEntries.amount }).from(costEntries).innerJoin(projects, eq(costEntries.projectId, projects.id)).where(eq(projects.ownerId, userId)),
+  ]);
+  const spent = ownerCosts.reduce((total, entry) => total + Number(entry.amount), 0);
+  const budget = ownedProjects.reduce((total, project) => total + Number(project.budgetLimit), 0);
+  return {
+    queued: runtimeRecords.filter((record) => record.status === "queued").length,
+    activeLeases: runtimeRecords.filter((record) => record.status === "claimed").length,
+    failedLast24h: runtimeRecords.filter((record) => (record.status === "failed" || record.status === "blocked") && new Date(record.completedAt ?? record.createdAt).getTime() >= since.getTime()).length,
+    pendingApprovals: pendingApprovals.length,
+    readyRunners: runners.filter((runner) => runner.status === "ready").length,
+    workerStatus: worker.runtimeStatus,
+    workerHeartbeatAt: worker.lastHeartbeatAt,
+    budgetPercent: budget > 0 ? Math.min(100, Math.round((spent / budget) * 100)) : 0,
+  };
+}
+
 export async function requestIsolatedRuntimeExecution(userId: number, input: { projectId: number; targetPath: string; engineRunId?: number }) {
   const ensured = await ensureWorkspaceForProject(userId, input.projectId);
   const workspace = ensured.workspace;

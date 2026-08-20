@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 
-import { filterRuntimeRecords, getRuntimeEventType, getRuntimeSeverity, getRuntimeStats } from "../lib/runtime-monitor";
+import { filterRuntimeRecords, getRuntimeEventType, getRuntimeSeverity, getRuntimeStats, runtimeSavedFilters } from "../lib/runtime-monitor";
+import { buildRedactedRuntimeExport, redactOperationalText } from "../lib/runtime-data-policy";
+import { getOperationalHealth } from "../lib/runtime-health";
 
 const records = [
   { request: { status: "completed" } },
@@ -38,5 +40,27 @@ describe("runtime monitor helpers", () => {
       requiresAttention: 4,
       readyRunners: 2,
     });
+  });
+
+  it("filters by safe text search and exposes focused saved presets", () => {
+    const richRecords = [
+      { request: { status: "failed", targetPath: "src/server.ts", reason: "token=secret-value failed", createdAt: new Date() } },
+      { request: { status: "completed", targetPath: "src/app.ts", reason: "done", createdAt: new Date() } },
+    ];
+    expect(filterRuntimeRecords(richRecords, { status: "all", eventType: "all", severity: "all", search: "server", timeRange: "24h" })).toHaveLength(1);
+    expect(runtimeSavedFilters.map((preset) => preset.id)).toEqual(["all", "urgent", "decisions"]);
+  });
+
+  it("redacts credential-like values from exported operational records", () => {
+    expect(redactOperationalText("API_KEY=abc123")).toContain("API_KEY: [محجوب]");
+    const exported = buildRedactedRuntimeExport([{ request: { id: 1, targetPath: "src/a.ts", status: "failed", reason: "password=demo", stdout: "ok", stderr: "token=abc", createdAt: new Date(), exitCode: 1 }, project: { code: "HUB", name: "Hub" } }]);
+    expect(exported).not.toContain("abc");
+    expect(exported).toContain("[محجوب]");
+  });
+
+  it("marks stale leased work and recent failures as requiring intervention", () => {
+    const health = getOperationalHealth({ queued: 0, activeLeases: 1, failedLast24h: 1, pendingApprovals: 0, readyRunners: 1, workerStatus: "awaiting_service", workerHeartbeatAt: null, budgetPercent: 44 });
+    expect(health.tone).toBe("critical");
+    expect(health.cards.find((card) => card.id === "failures")?.tone).toBe("critical");
   });
 });

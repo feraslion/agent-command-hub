@@ -6,10 +6,15 @@ describe("local runner policy", () => {
     expect(assertLocalRunnerExecutable("source/math.js", "console.log(2 + 2);")).toEqual({ normalizedPath: "source/math.js", profile: "node_script" });
   });
 
+  it("accepts standalone TypeScript through the locked compiler profile", () => {
+    expect(assertLocalRunnerExecutable("tests/math.ts", "const total: number = 2 + 2; console.log(total);")).toEqual({ normalizedPath: "tests/math.ts", profile: "typescript_lockfile" });
+  });
+
   it("rejects files outside the execution scope and blocked capabilities", () => {
     expect(() => assertLocalRunnerExecutable("docs/readme.js", "console.log('no');")).toThrow(LocalRunnerPolicyError);
     expect(() => assertLocalRunnerExecutable("source/network.js", "fetch('https://example.com');")).toThrow(LocalRunnerPolicyError);
-    expect(() => assertLocalRunnerExecutable("source/runtime.ts", "console.log('no');")).toThrow(LocalRunnerPolicyError);
+    expect(() => assertLocalRunnerExecutable("source/runtime.ts", "import value from 'package'; console.log(value);")).toThrow(LocalRunnerPolicyError);
+    expect(() => assertLocalRunnerExecutable("source/../secrets.ts", "console.log('no');")).toThrow(LocalRunnerPolicyError);
   });
 
   it("caps persisted output deterministically", () => {

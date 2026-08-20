@@ -1,6 +1,6 @@
 import path from "node:path";
 
-export const localRunnerProfileValues = ["node_script"] as const;
+export const localRunnerProfileValues = ["node_script", "typescript_lockfile"] as const;
 export type LocalRunnerProfile = (typeof localRunnerProfileValues)[number];
 
 export const localRunnerPolicy = {
@@ -13,7 +13,9 @@ export const localRunnerPolicy = {
   stdoutLimit: 8_000,
   stderrLimit: 8_000,
   allowedDirectories: ["source", "tests"],
-  allowedExtensions: [".js", ".mjs", ".cjs"],
+  allowedExtensions: [".js", ".mjs", ".cjs", ".ts"],
+  typescriptImage: "agenthub-runner-ts:5.7.3",
+  typescriptVersion: "5.7.3",
 } as const;
 
 const blockedSourcePatterns = [
@@ -38,11 +40,11 @@ export function assertLocalRunnerExecutable(pathValue: string, content: string) 
   const [directory] = normalized.split("/");
   const extension = path.extname(normalized).toLowerCase();
 
-  if (!localRunnerPolicy.allowedDirectories.includes(directory as (typeof localRunnerPolicy.allowedDirectories)[number])) {
+  if (normalized.includes("/../") || normalized.startsWith("../") || !/^(?:source|tests)(?:\/[A-Za-z0-9._-]+)+\.(?:js|mjs|cjs|ts)$/u.test(normalized) || !localRunnerPolicy.allowedDirectories.includes(directory as (typeof localRunnerPolicy.allowedDirectories)[number])) {
     throw new LocalRunnerPolicyError("يسمح Runner المحلي بتنفيذ ملفات source أو tests فقط.");
   }
   if (!localRunnerPolicy.allowedExtensions.includes(extension as (typeof localRunnerPolicy.allowedExtensions)[number])) {
-    throw new LocalRunnerPolicyError("المرحلة الأولى تدعم ملفات JavaScript المستقلة فقط (.js و.mjs و.cjs).");
+    throw new LocalRunnerPolicyError("يدعم Runner ملفات JavaScript المستقلة أو TypeScript المستقلة (.ts) عبر صورة مقيدة مثبتة من lockfile.");
   }
   if (!content.trim() || Buffer.byteLength(content, "utf8") > localRunnerPolicy.maxSourceBytes) {
     throw new LocalRunnerPolicyError("محتوى الملف فارغ أو يتجاوز حد التنفيذ المحلي الآمن.");
@@ -51,7 +53,7 @@ export function assertLocalRunnerExecutable(pathValue: string, content: string) 
     throw new LocalRunnerPolicyError("يحتوي الملف على استيراد أو وصول نظام أو شبكة أو تنفيذ ديناميكي محجوب في Runner المحلي.");
   }
 
-  return { normalizedPath: normalized, profile: "node_script" as const };
+  return { normalizedPath: normalized, profile: extension === ".ts" ? "typescript_lockfile" as const : "node_script" as const };
 }
 
 export function truncateRunnerOutput(value: string, limit: number) {

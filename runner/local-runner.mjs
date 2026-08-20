@@ -14,7 +14,8 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
 
-const IMAGE = "node:22-alpine";
+const NODE_IMAGE = "node:22-alpine";
+const TYPESCRIPT_IMAGE = "agenthub-runner-ts:5.7.3";
 const POLL_MS = 5_000;
 const TIMEOUT_MS = 15_000;
 const OUTPUT_LIMIT = 8_000;
@@ -51,19 +52,20 @@ function capped(current, next) {
 }
 
 function assertPayload(payload) {
-  if (!payload || payload.profile !== "node_script" || typeof payload.targetPath !== "string" || typeof payload.content !== "string") {
+  if (!payload || !["node_script", "typescript_lockfile"].includes(payload.profile) || typeof payload.targetPath !== "string" || typeof payload.content !== "string") {
     throw new Error("Runner received an invalid execution payload.");
   }
   const normalized = payload.targetPath.replaceAll("\\", "/");
   const [directory, ...rest] = normalized.split("/");
   const ext = path.extname(normalized).toLowerCase();
-  if (!["source", "tests"].includes(directory) || rest.length === 0 || normalized.includes("..") || ![".js", ".mjs", ".cjs"].includes(ext)) {
+  if (!["source", "tests"].includes(directory) || rest.length === 0 || !/^(?:source|tests)(?:\/[A-Za-z0-9._-]+)+\.(?:js|mjs|cjs|ts)$/u.test(normalized)) {
     throw new Error("Runner rejected the workspace path or file extension.");
   }
+  if ((payload.profile === "typescript_lockfile") !== (ext === ".ts")) throw new Error("Runner rejected a profile that does not match the file extension.");
   if (!payload.content.trim() || Buffer.byteLength(payload.content, "utf8") > 32_000 || BLOCKED.some((pattern) => pattern.test(payload.content))) {
     throw new Error("Runner rejected source that exceeds the local safety policy.");
   }
-  return normalized;
+  return { normalized, profile: payload.profile };
 }
 
 function run(command, args, options = {}) {
@@ -79,7 +81,7 @@ function run(command, args, options = {}) {
 }
 
 async function execute(payload) {
-  const targetPath = assertPayload(payload);
+  const { normalized: targetPath, profile } = assertPayload(payload);
   const workspace = await mkdtemp(path.join(tmpdir(), "agenthub-runner-"));
   const targetFile = path.resolve(workspace, targetPath);
   const containerName = `agenthub-${payload.requestId}-${randomUUID().slice(0, 8)}`;
@@ -92,6 +94,9 @@ async function execute(payload) {
     await chmod(path.dirname(targetFile), 0o755);
     await writeFile(targetFile, payload.content, { encoding: "utf8", mode: 0o444 });
 
+    const runtimeCommand = profile === "typescript_lockfile"
+      ? ["sh", "-ceu", `/runtime/node_modules/.bin/tsc --pretty false --target ES2022 --module NodeNext --moduleResolution NodeNext --outDir /tmp/compiled --rootDir /workspace -- /${targetPath} && node --disable-proto=throw --frozen-intrinsics /tmp/compiled/${targetPath.replace(/\.ts$/u, ".js")}`]
+      : ["node", "--disable-proto=throw", "--frozen-intrinsics", `/${targetPath}`];
     const dockerArgs = [
       "run", "--rm", "--name", containerName,
       "--network", "none",
@@ -105,8 +110,8 @@ async function execute(payload) {
       "--user", "1000:1000",
       "--workdir", "/workspace",
       "--mount", `type=bind,src=${workspace},dst=/workspace,readonly`,
-      IMAGE,
-      "node", "--disable-proto=throw", "--frozen-intrinsics", `/${targetPath}`,
+      profile === "typescript_lockfile" ? TYPESCRIPT_IMAGE : NODE_IMAGE,
+      ...runtimeCommand,
     ];
     const execution = await new Promise((resolve) => {
       const timeout = setTimeout(async () => {
@@ -137,7 +142,7 @@ async function main() {
   };
 
   const tick = async () => {
-    await call("/api/local-runner/heartbeat", { capabilities: { profile: "node_script", docker: true } });
+    await call("/api/local-runner/heartbeat", { capabilities: { profiles: ["node_script", "typescript_lockfile"], docker: true, typescriptImage: TYPESCRIPT_IMAGE } });
     const claim = await call("/api/local-runner/claim");
     if (!claim.request) return false;
     let result;

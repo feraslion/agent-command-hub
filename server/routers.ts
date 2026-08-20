@@ -146,6 +146,7 @@ export const appRouter = router({
   }),
   isolatedRuntime: router({
     status: protectedProcedure.query(({ ctx }) => db.getIsolatedRuntimeStatusForOwner(ctx.user.id)),
+    listForOwner: protectedProcedure.query(({ ctx }) => db.listOwnerIsolatedRuntimeRequests(ctx.user.id)),
     listRequests: protectedProcedure.input(projectIdInput.extend({ limit: z.number().int().min(1).max(100).optional() })).query(({ ctx, input }) => db.listIsolatedRuntimeRequestsForProject(ctx.user.id, input.projectId, input.limit ?? 50)),
     requestExecution: protectedProcedure.input(projectIdInput.extend({ targetPath: z.string().trim().min(1).max(512), engineRunId: z.number().int().positive().optional() })).mutation(({ ctx, input }) => db.requestIsolatedRuntimeExecution(ctx.user.id, input)),
   }),

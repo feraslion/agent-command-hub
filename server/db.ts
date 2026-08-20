@@ -335,6 +335,19 @@ function isRunnerFresh(lastHeartbeatAt: Date | null) {
   return Boolean(lastHeartbeatAt && Date.now() - new Date(lastHeartbeatAt).getTime() <= localRunnerHeartbeatWindowMs);
 }
 
+function runnerProfiles(capabilities: string | null) {
+  try {
+    const parsed = JSON.parse(capabilities ?? "{}") as { profiles?: unknown };
+    return Array.isArray(parsed.profiles) ? parsed.profiles.filter((value): value is string => typeof value === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+function supportsRunnerProfile(runner: typeof localRunners.$inferSelect, profile: string) {
+  return runnerProfiles(runner.capabilities).includes(profile);
+}
+
 function publicRunner(runner: typeof localRunners.$inferSelect) {
   return {
     id: runner.id,
@@ -494,6 +507,21 @@ export async function listIsolatedRuntimeRequestsForProject(userId: number, proj
   return db.select().from(isolatedRuntimeRequests).where(eq(isolatedRuntimeRequests.projectId, projectId)).orderBy(desc(isolatedRuntimeRequests.createdAt)).limit(limit);
 }
 
+export async function listOwnerIsolatedRuntimeRequests(userId: number, limit = 50) {
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+  return db.select({
+    request: isolatedRuntimeRequests,
+    project: { id: projects.id, name: projects.name, code: projects.code },
+    runner: { id: localRunners.id, label: localRunners.label, runnerKey: localRunners.runnerKey },
+  }).from(isolatedRuntimeRequests)
+    .innerJoin(projects, eq(isolatedRuntimeRequests.projectId, projects.id))
+    .leftJoin(localRunners, eq(isolatedRuntimeRequests.runnerId, localRunners.id))
+    .where(eq(projects.ownerId, userId))
+    .orderBy(desc(isolatedRuntimeRequests.createdAt))
+    .limit(limit);
+}
+
 export async function requestIsolatedRuntimeExecution(userId: number, input: { projectId: number; targetPath: string; engineRunId?: number }) {
   const ensured = await ensureWorkspaceForProject(userId, input.projectId);
   const workspace = ensured.workspace;
@@ -502,27 +530,32 @@ export async function requestIsolatedRuntimeExecution(userId: number, input: { p
   if (!db) throw new Error("Database not available");
   const [file] = await db.select({ id: workspaceFiles.id, content: workspaceFiles.content }).from(workspaceFiles).where(and(eq(workspaceFiles.workspaceId, workspace.id), eq(workspaceFiles.path, path))).limit(1);
   if (!file) throw new Error("Workspace file not found");
-  const runtimeStatus = await getIsolatedRuntimeStatusForOwner(userId);
-  if (!runtimeStatus.runner) {
+  const executable = assertLocalRunnerExecutable(path, file.content);
+  const runners = await db.select().from(localRunners).where(eq(localRunners.ownerId, userId)).orderBy(desc(localRunners.updatedAt));
+  const runner = runners.find((candidate) => candidate.status === "ready" && isRunnerFresh(candidate.lastHeartbeatAt) && supportsRunnerProfile(candidate, executable.profile));
+  if (!runner) {
+    const detail = executable.profile === "typescript_lockfile"
+      ? "لا يوجد Runner محلي متصل يعلن دعم صورة TypeScript المثبتة من lockfile. شغّل العميل المحدث ثم أعد المحاولة."
+      : "اربط Runner محلياً في الإعدادات وشغله على جهاز يملك Docker. لن ينفذ التطبيق شيفرة أو أدوات حتى يصل heartbeat صالح.";
     const [result] = await db.insert(isolatedRuntimeRequests).values({
       projectId: input.projectId,
       workspaceId: workspace.id,
       engineRunId: input.engineRunId ?? null,
       requestedByUserId: userId,
       targetPath: path,
+      profile: executable.profile,
       status: "environment_required",
-      reason: runtimeStatus.detail,
+      reason: detail,
     });
-    await recordWorkspaceAudit(workspace.id, { actor: "Isolated Runtime Gate", action: "tool_rejected", path, detail: "تم تسجيل طلب تنفيذ، لكن Runner محلياً غير متصل." });
-    await recordExecutionEvent(userId, input.projectId, { actor: "Isolated Runtime Gate", type: "ISOLATED_RUNTIME_RUNNER_REQUIRED", label: "حُجب التنفيذ بانتظار Runner محلي", detail: path });
+    await recordWorkspaceAudit(workspace.id, { actor: "Isolated Runtime Gate", action: "tool_rejected", path, detail });
+    await recordExecutionEvent(userId, input.projectId, { actor: "Isolated Runtime Gate", type: "ISOLATED_RUNTIME_RUNNER_REQUIRED", label: "حُجب التنفيذ بانتظار Runner متوافق", detail: path });
     return (await db.select().from(isolatedRuntimeRequests).where(eq(isolatedRuntimeRequests.id, Number(result.insertId))).limit(1))[0];
   }
-  const executable = assertLocalRunnerExecutable(path, file.content);
   const approval = await createApprovalRequest(userId, {
     projectId: input.projectId,
     requestedBy: "Isolated Runtime Gate",
     title: `تنفيذ معزول للملف ${path}`,
-    detail: `سيشغّل Runner المحلي ${runtimeStatus.runner.label} ملف JavaScript مستقلاً داخل حاوية بلا شبكة وبحدود 15 ثانية و256MB.`,
+    detail: `سيشغّل Runner المحلي ${runner.label} ملف ${executable.profile === "typescript_lockfile" ? "TypeScript مستقلاً من صورة مقيدة مثبتة بـ lockfile" : "JavaScript مستقلاً"} داخل حاوية بلا شبكة وبحدود 15 ثانية و256MB.`,
     impact: "تنفيذ شيفرة داخل بيئة Docker محلية مقيدة بعد اعتماد صريح.",
     level: "approval",
   });
@@ -532,7 +565,7 @@ export async function requestIsolatedRuntimeExecution(userId: number, input: { p
     engineRunId: input.engineRunId ?? null,
     requestedByUserId: userId,
     approvalId: approval.id,
-    runnerId: runtimeStatus.runner.id,
+    runnerId: runner.id,
     targetPath: path,
     profile: executable.profile,
     status: "awaiting_approval",

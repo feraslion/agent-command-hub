@@ -1,0 +1,66 @@
+name: Label new issues
+
+on:
+  issues:
+    types:
+      - opened
+
+permissions:
+  issues: write
+
+jobs:
+  label:
+    name: Apply issue labels
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Add type, area, and priority labels
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          ISSUE_TITLE: ${{ github.event.issue.title }}
+          ISSUE_BODY: ${{ github.event.issue.body }}
+        run: |
+          set -euo pipefail
+
+          labels=("triage")
+          body="${ISSUE_BODY:-}"
+
+          if [[ "$ISSUE_TITLE" == "[خطأ]:"* ]]; then
+            labels+=("bug")
+          elif [[ "$ISSUE_TITLE" == "[ميزة]:"* ]]; then
+            labels+=("enhancement")
+          fi
+
+          if [[ "$body" == *"الواجهة والتجربة"* ]]; then
+            labels+=("area: ui")
+          elif [[ "$body" == *"الوكلاء وقوالب System Prompt"* ]]; then
+            labels+=("area: agents")
+          elif [[ "$body" == *"Workspace والمحرر"* ]]; then
+            labels+=("area: workspace")
+          elif [[ "$body" == *"Task Engine والموافقات"* ]]; then
+            labels+=("area: task-engine")
+          elif [[ "$body" == *"Runtime أو العامل"* ]]; then
+            labels+=("area: runtime")
+          elif [[ "$body" == *"Android أو البناء"* ]]; then
+            labels+=("platform: android")
+          elif [[ "$body" == *"GitHub والجودة"* ]]; then
+            labels+=("area: github")
+          elif [[ "$body" == *"غير ذلك"* ]]; then
+            labels+=("area: other")
+          fi
+
+          if [[ "$body" == *"حرج — يمنع"* ]]; then
+            labels+=("priority: critical")
+          elif [[ "$body" == *"مرتفع — يعطل"* || "$body" == *"عالية — تعالج"* ]]; then
+            labels+=("priority: high")
+          elif [[ "$body" == *"متوسط — يؤثر"* || "$body" == *"متوسطة — تحسن"* ]]; then
+            labels+=("priority: medium")
+          elif [[ "$body" == *"منخفض — مشكلة"* || "$body" == *"منخفضة — تحسين"* ]]; then
+            labels+=("priority: low")
+          fi
+
+          for label in "${labels[@]}"; do
+            gh issue edit "$ISSUE_NUMBER" --add-label "$label"
+          done

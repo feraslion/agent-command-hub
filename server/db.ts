@@ -15,6 +15,7 @@ import {
   isolatedRuntimeBundles,
   isolatedRuntimeRequests,
   localRunners,
+  multiFileBundleTemplates,
   modelCostReservations,
   modelUsage,
   projectBriefs,
@@ -755,6 +756,64 @@ export async function requestMultiFileRuntimeExecution(userId: number, input: { 
   await recordExecutionEvent(userId, input.projectId, { actor: "Multi-file Runtime Gate", type: "ISOLATED_RUNTIME_APPROVAL_REQUESTED", label: "طلب موافقة لتنفيذ متعدد الملفات", detail: bundle.entryPath });
   broadcastRuntimeUpdate(userId, "approval");
   return (await db.select().from(isolatedRuntimeRequests).where(eq(isolatedRuntimeRequests.id, Number(result.insertId))).limit(1))[0];
+}
+
+function parseMultiFileTemplatePaths(pathsJson: string) {
+  try {
+    const parsed: unknown = JSON.parse(pathsJson);
+    return Array.isArray(parsed) ? parsed.filter((path): path is string => typeof path === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+export async function listMultiFileBundleTemplatesForProject(userId: number, projectId: number) {
+  const { db } = await requireOwnedProject(userId, projectId);
+  const templates = await db.select().from(multiFileBundleTemplates).where(eq(multiFileBundleTemplates.projectId, projectId)).orderBy(desc(multiFileBundleTemplates.updatedAt));
+  return templates.map((template) => ({ ...template, paths: parseMultiFileTemplatePaths(template.pathsJson) }));
+}
+
+export async function saveMultiFileBundleTemplateForProject(userId: number, input: { projectId: number; name: string; entryPath: string; paths: string[] }) {
+  const ensured = await ensureWorkspaceForProject(userId, input.projectId);
+  const workspace = ensured.workspace;
+  const name = input.name.trim();
+  if (!name) throw new Error("اسم قالب الحزمة مطلوب.");
+  const entryPath = normalizeWorkspacePath(input.entryPath);
+  const requestedPaths = [...new Set(input.paths.map(normalizeWorkspacePath))];
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+  const workspaceBundle = await db.select({ path: workspaceFiles.path, content: workspaceFiles.content }).from(workspaceFiles).where(and(
+    eq(workspaceFiles.workspaceId, workspace.id),
+    inArray(workspaceFiles.path, requestedPaths),
+  ));
+  if (workspaceBundle.length !== requestedPaths.length) throw new Error("لا يمكن حفظ قالب يحتوي ملفات غير موجودة في Workspace.");
+  const bundle = assertMultiFileBundle(entryPath, workspaceBundle);
+  const pathsJson = JSON.stringify(bundle.files.map((file) => file.path));
+  await db.insert(multiFileBundleTemplates).values({
+    projectId: input.projectId,
+    name,
+    entryPath: bundle.entryPath,
+    pathsJson,
+  }).onDuplicateKeyUpdate({
+    set: { entryPath: bundle.entryPath, pathsJson, updatedAt: new Date() },
+  });
+  await recordWorkspaceAudit(workspace.id, {
+    actor: "Multi-file Template",
+    action: "gate_requested",
+    path: bundle.entryPath,
+    detail: `حُفظ قالب حزمة TypeScript باسم «${name}» يضم ${bundle.files.length} ملفات؛ لا ينشئ ذلك طلب تنفيذ.`,
+  });
+  await recordExecutionEvent(userId, input.projectId, {
+    actor: "Multi-file Template",
+    type: "MULTI_FILE_TEMPLATE_SAVED",
+    label: "حُفظ قالب حزمة TypeScript",
+    detail: `${name} · ${bundle.files.length} ملفات`,
+  });
+  const [template] = await db.select().from(multiFileBundleTemplates).where(and(
+    eq(multiFileBundleTemplates.projectId, input.projectId),
+    eq(multiFileBundleTemplates.name, name),
+  )).limit(1);
+  return { ...template, paths: parseMultiFileTemplatePaths(template.pathsJson) };
 }
 
 export async function getWorkerSettingsForOwner(userId: number) {

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { hasValidManualMultiFileBundle, isEligibleMultiFilePath, MAX_MANUAL_MULTI_FILE_SELECTION, toggleMultiFileSelection } from "../lib/multi-file-bundle-selection";
+import { applySavedMultiFileTemplate, hasValidManualMultiFileBundle, isEligibleMultiFilePath, MAX_MANUAL_MULTI_FILE_SELECTION, toggleMultiFileSelection } from "../lib/multi-file-bundle-selection";
 
 describe("manual multi-file bundle selection", () => {
   it("accepts only TypeScript files inside source or tests", () => {
@@ -20,5 +20,13 @@ describe("manual multi-file bundle selection", () => {
     expect(hasValidManualMultiFileBundle("source/main.ts", ["source/main.ts", "source/math.ts"])).toBe(true);
     expect(hasValidManualMultiFileBundle("source/main.ts", ["source/math.ts", "source/format.ts"])).toBe(false);
     expect(hasValidManualMultiFileBundle("source/main.ts", ["source/main.ts"])).toBe(false);
+  });
+
+  it("applies only paths that remain eligible and available in Workspace", () => {
+    expect(applySavedMultiFileTemplate({ entryPath: "source/main.ts", paths: ["source/main.ts", "source/math.ts", "source/removed.ts"] }, ["source/main.ts", "source/math.ts", "docs/notes.ts"])).toEqual({
+      paths: ["source/main.ts", "source/math.ts"],
+      entryPath: "source/main.ts",
+      skippedCount: 1,
+    });
   });
 });

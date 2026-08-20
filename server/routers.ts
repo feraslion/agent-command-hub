@@ -219,6 +219,12 @@ export const appRouter = router({
     status: protectedProcedure.query(({ ctx }) => db.getIsolatedRuntimeStatusForOwner(ctx.user.id)),
     listForOwner: protectedProcedure.query(({ ctx }) => db.listOwnerIsolatedRuntimeRequests(ctx.user.id)),
     listRequests: protectedProcedure.input(projectIdInput.extend({ limit: z.number().int().min(1).max(100).optional() })).query(({ ctx, input }) => db.listIsolatedRuntimeRequestsForProject(ctx.user.id, input.projectId, input.limit ?? 50)),
+    listMultiFileTemplates: protectedProcedure.input(projectIdInput).query(({ ctx, input }) => db.listMultiFileBundleTemplatesForProject(ctx.user.id, input.projectId)),
+    saveMultiFileTemplate: protectedProcedure.input(projectIdInput.extend({
+      name: z.string().trim().min(2).max(80),
+      entryPath: z.string().trim().min(1).max(512),
+      paths: z.array(z.string().trim().min(1).max(512)).min(2).max(24),
+    })).mutation(({ ctx, input }) => db.saveMultiFileBundleTemplateForProject(ctx.user.id, input)),
     requestExecution: protectedProcedure.input(projectIdInput.extend({ targetPath: z.string().trim().min(1).max(512), engineRunId: z.number().int().positive().optional() })).mutation(({ ctx, input }) => db.requestIsolatedRuntimeExecution(ctx.user.id, input)),
     requestMultiFileExecution: protectedProcedure.input(projectIdInput.extend({ entryPath: z.string().trim().min(1).max(512), paths: z.array(z.string().trim().min(1).max(512)).min(2).max(24), engineRunId: z.number().int().positive().optional() })).mutation(({ ctx, input }) => db.requestMultiFileRuntimeExecution(ctx.user.id, input)),
   }),

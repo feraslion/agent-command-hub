@@ -2,11 +2,9 @@ name: Quality checks
 
 on:
   push:
-    branches:
-      - main
+    branches: [main]
   pull_request:
-    branches:
-      - main
+    branches: [main]
 
 permissions:
   contents: read
@@ -24,12 +22,11 @@ jobs:
     steps:
       - name: Check out source
         uses: actions/checkout@v4
-  
+
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: 22
-          cache: pnpm
 
       - name: Install pnpm
         run: npm install --global pnpm@9.12.0

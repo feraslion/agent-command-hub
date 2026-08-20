@@ -372,6 +372,19 @@ export const isolatedRuntimeBundles = mysqlTable("isolated_runtime_bundles", {
   uniqueIndex("isolated_runtime_bundles_request_unique").on(table.requestId),
 ]);
 
+export const multiFileBundleTemplates = mysqlTable("multi_file_bundle_templates", {
+  id: int("id").autoincrement().primaryKey(),
+  projectId: int("project_id").notNull().references(() => projects.id, { onDelete: "cascade" }),
+  name: varchar("name", { length: 80 }).notNull(),
+  entryPath: varchar("entry_path", { length: 512 }).notNull(),
+  pathsJson: text("paths_json").notNull(),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().onUpdateNow().notNull(),
+}, (table) => [
+  uniqueIndex("multi_file_bundle_templates_project_name_unique").on(table.projectId, table.name),
+  index("multi_file_bundle_templates_project_updated_idx").on(table.projectId, table.updatedAt),
+]);
+
 export const sensitiveWorkspaceChanges = mysqlTable("sensitive_workspace_changes", {
   id: int("id").autoincrement().primaryKey(),
   projectId: int("project_id").notNull().references(() => projects.id, { onDelete: "cascade" }),

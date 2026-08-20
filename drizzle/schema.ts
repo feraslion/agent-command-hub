@@ -27,7 +27,8 @@ export const taskEngineRunStatusValues = ["queued", "running", "awaiting_review"
 export const taskEngineStepStatusValues = ["pending", "running", "awaiting_review", "awaiting_approval", "completed", "failed", "skipped"] as const;
 export const sandboxCheckKindValues = ["workspace_policy", "logical_test", "git_gate", "publish_gate", "delete_gate"] as const;
 export const sandboxCheckStatusValues = ["passed", "blocked", "awaiting_approval", "rejected"] as const;
-export const isolatedRuntimeRequestStatusValues = ["environment_required", "blocked", "approved", "submitted", "completed", "failed"] as const;
+export const isolatedRuntimeRequestStatusValues = ["environment_required", "awaiting_approval", "queued", "claimed", "blocked", "approved", "submitted", "completed", "failed", "cancelled"] as const;
+export const localRunnerStatusValues = ["pairing", "ready", "busy", "offline", "revoked"] as const;
 export const sensitiveWorkspaceChangeStatusValues = ["pending_secondary", "applied", "rejected", "conflicted"] as const;
 export const promptTemplateKeyValues = ["planner", "coder", "qa", "debugger"] as const;
 export const promptTemplateLocaleValues = ["ar", "en"] as const;
@@ -264,20 +265,49 @@ export const sandboxChecks = mysqlTable("sandbox_checks", {
   index("sandbox_checks_project_created_idx").on(table.projectId, table.createdAt),
 ]);
 
+export const localRunners = mysqlTable("local_runners", {
+  id: int("id").autoincrement().primaryKey(),
+  ownerId: int("owner_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+  runnerKey: varchar("runner_key", { length: 128 }).notNull(),
+  label: varchar("label", { length: 128 }).notNull(),
+  tokenHash: varchar("token_hash", { length: 128 }).notNull(),
+  status: mysqlEnum("status", localRunnerStatusValues).default("pairing").notNull(),
+  capabilities: text("capabilities"),
+  lastHeartbeatAt: timestamp("last_heartbeat_at"),
+  revokedAt: timestamp("revoked_at"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().onUpdateNow().notNull(),
+}, (table) => [
+  uniqueIndex("local_runners_owner_key_unique").on(table.ownerId, table.runnerKey),
+  uniqueIndex("local_runners_token_hash_unique").on(table.tokenHash),
+  index("local_runners_owner_updated_idx").on(table.ownerId, table.updatedAt),
+]);
+
 export const isolatedRuntimeRequests = mysqlTable("isolated_runtime_requests", {
   id: int("id").autoincrement().primaryKey(),
   projectId: int("project_id").notNull().references(() => projects.id, { onDelete: "cascade" }),
   workspaceId: int("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
   engineRunId: int("engine_run_id").references(() => taskEngineRuns.id, { onDelete: "set null" }),
   requestedByUserId: int("requested_by_user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+  approvalId: int("approval_id").references(() => approvals.id, { onDelete: "set null" }),
+  runnerId: int("runner_id").references(() => localRunners.id, { onDelete: "set null" }),
   targetPath: varchar("target_path", { length: 512 }).notNull(),
+  profile: varchar("profile", { length: 64 }).default("node_script").notNull(),
   status: mysqlEnum("status", isolatedRuntimeRequestStatusValues).default("environment_required").notNull(),
   reason: text("reason").notNull(),
+  exitCode: int("exit_code"),
+  stdout: text("stdout"),
+  stderr: text("stderr"),
+  durationMs: int("duration_ms"),
+  claimedAt: timestamp("claimed_at"),
+  completedAt: timestamp("completed_at"),
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().onUpdateNow().notNull(),
 }, (table) => [
   index("isolated_runtime_requests_project_created_idx").on(table.projectId, table.createdAt),
   index("isolated_runtime_requests_workspace_created_idx").on(table.workspaceId, table.createdAt),
+  index("isolated_runtime_requests_runner_status_idx").on(table.runnerId, table.status),
+  index("isolated_runtime_requests_approval_idx").on(table.approvalId),
 ]);
 
 export const sensitiveWorkspaceChanges = mysqlTable("sensitive_workspace_changes", {

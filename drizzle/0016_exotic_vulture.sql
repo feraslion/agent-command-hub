@@ -1,0 +1,1 @@
+ALTER TABLE `isolated_runtime_requests` MODIFY COLUMN `status` enum('environment_required','awaiting_approval','queued','claimed','blocked','approved','submitted','completed','failed','cancelled') NOT NULL DEFAULT 'environment_required';

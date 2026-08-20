@@ -1,6 +1,6 @@
 import path from "node:path";
 
-export const localRunnerProfileValues = ["node_script", "typescript_lockfile"] as const;
+export const localRunnerProfileValues = ["node_script", "typescript_lockfile", "typescript_multi_file"] as const;
 export type LocalRunnerProfile = (typeof localRunnerProfileValues)[number];
 
 export const localRunnerPolicy = {

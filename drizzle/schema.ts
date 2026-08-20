@@ -32,6 +32,16 @@ export const localRunnerStatusValues = ["pairing", "ready", "busy", "offline", "
 export const sensitiveWorkspaceChangeStatusValues = ["pending_secondary", "applied", "rejected", "conflicted"] as const;
 export const promptTemplateKeyValues = ["planner", "coder", "qa", "debugger"] as const;
 export const promptTemplateLocaleValues = ["ar", "en"] as const;
+export const workPlanStatusValues = ["draft", "review", "approved", "superseded"] as const;
+export const criterionStatusValues = ["pending", "verified", "waived"] as const;
+export const contextPackageStatusValues = ["draft", "sealed"] as const;
+export const projectReportKindValues = ["delivery", "blocked"] as const;
+export const projectReportStatusValues = ["draft", "final"] as const;
+export const agentModelRoleValues = ["planner", "coder", "qa", "reviewer", "debugger"] as const;
+export const agentModelRunStatusValues = ["reserved", "running", "completed", "failed", "blocked", "cancelled"] as const;
+export const modelCostReservationStatusValues = ["reserved", "settled", "released", "expired"] as const;
+export const repositoryLinkStatusValues = ["unlinked", "scanned", "stale"] as const;
+export const repositoryScanStatusValues = ["reported", "rejected"] as const;
 
 export const projects = mysqlTable("projects", {
   id: int("id").autoincrement().primaryKey(),
@@ -49,6 +59,32 @@ export const projects = mysqlTable("projects", {
 }, (table) => [
   uniqueIndex("projects_owner_code_unique").on(table.ownerId, table.code),
   index("projects_owner_updated_idx").on(table.ownerId, table.updatedAt),
+]);
+
+export const projectBriefs = mysqlTable("project_briefs", {
+  id: int("id").autoincrement().primaryKey(),
+  projectId: int("project_id").notNull().references(() => projects.id, { onDelete: "cascade" }),
+  goal: text("goal").notNull(),
+  scope: text("scope").notNull(),
+  constraints: text("constraints").notNull(),
+  assumptions: text("assumptions").notNull(),
+  openQuestions: text("open_questions").notNull(),
+  risks: text("risks").notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().onUpdateNow().notNull(),
+}, (table) => [
+  uniqueIndex("project_briefs_project_unique").on(table.projectId),
+]);
+
+export const workPlans = mysqlTable("work_plans", {
+  id: int("id").autoincrement().primaryKey(),
+  projectId: int("project_id").notNull().references(() => projects.id, { onDelete: "cascade" }),
+  title: varchar("title", { length: 255 }).notNull(),
+  summary: text("summary").notNull(),
+  status: mysqlEnum("status", workPlanStatusValues).default("draft").notNull(),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().onUpdateNow().notNull(),
+}, (table) => [
+  index("work_plans_project_updated_idx").on(table.projectId, table.updatedAt),
 ]);
 
 export const agents = mysqlTable("agents", {
@@ -83,6 +119,7 @@ export const agentPromptAssignments = mysqlTable("agent_prompt_assignments", {
 export const tasks = mysqlTable("tasks", {
   id: int("id").autoincrement().primaryKey(),
   projectId: int("project_id").notNull().references(() => projects.id, { onDelete: "cascade" }),
+  workPlanId: int("work_plan_id").references(() => workPlans.id, { onDelete: "set null" }),
   parentId: int("parent_id"),
   assignedAgentId: int("assigned_agent_id").references(() => agents.id, { onDelete: "set null" }),
   title: varchar("title", { length: 255 }).notNull(),
@@ -110,6 +147,19 @@ export const taskDependencies = mysqlTable("task_dependencies", {
   createdAt: timestamp("created_at").defaultNow().notNull(),
 }, (table) => [
   uniqueIndex("task_dependencies_unique").on(table.taskId, table.dependsOnTaskId),
+]);
+
+export const taskAcceptanceCriteria = mysqlTable("task_acceptance_criteria", {
+  id: int("id").autoincrement().primaryKey(),
+  taskId: int("task_id").notNull().references(() => tasks.id, { onDelete: "cascade" }),
+  criterion: text("criterion").notNull(),
+  status: mysqlEnum("status", criterionStatusValues).default("pending").notNull(),
+  evidenceNote: text("evidence_note"),
+  verifiedAt: timestamp("verified_at"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().onUpdateNow().notNull(),
+}, (table) => [
+  index("task_acceptance_criteria_task_status_idx").on(table.taskId, table.status),
 ]);
 
 export const agentRuns = mysqlTable("agent_runs", {
@@ -310,6 +360,31 @@ export const isolatedRuntimeRequests = mysqlTable("isolated_runtime_requests", {
   index("isolated_runtime_requests_approval_idx").on(table.approvalId),
 ]);
 
+export const isolatedRuntimeBundles = mysqlTable("isolated_runtime_bundles", {
+  id: int("id").autoincrement().primaryKey(),
+  requestId: int("request_id").notNull().references(() => isolatedRuntimeRequests.id, { onDelete: "cascade" }),
+  entryPath: varchar("entry_path", { length: 512 }).notNull(),
+  filesJson: text("files_json").notNull(),
+  totalBytes: int("total_bytes").notNull(),
+  policyVersion: varchar("policy_version", { length: 32 }).default("v1").notNull(),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+}, (table) => [
+  uniqueIndex("isolated_runtime_bundles_request_unique").on(table.requestId),
+]);
+
+export const multiFileBundleTemplates = mysqlTable("multi_file_bundle_templates", {
+  id: int("id").autoincrement().primaryKey(),
+  projectId: int("project_id").notNull().references(() => projects.id, { onDelete: "cascade" }),
+  name: varchar("name", { length: 80 }).notNull(),
+  entryPath: varchar("entry_path", { length: 512 }).notNull(),
+  pathsJson: text("paths_json").notNull(),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().onUpdateNow().notNull(),
+}, (table) => [
+  uniqueIndex("multi_file_bundle_templates_project_name_unique").on(table.projectId, table.name),
+  index("multi_file_bundle_templates_project_updated_idx").on(table.projectId, table.updatedAt),
+]);
+
 export const sensitiveWorkspaceChanges = mysqlTable("sensitive_workspace_changes", {
   id: int("id").autoincrement().primaryKey(),
   projectId: int("project_id").notNull().references(() => projects.id, { onDelete: "cascade" }),
@@ -354,6 +429,37 @@ export const artifacts = mysqlTable("artifacts", {
   createdAt: timestamp("created_at").defaultNow().notNull(),
 }, (table) => [
   index("artifacts_project_created_idx").on(table.projectId, table.createdAt),
+]);
+
+export const contextPackages = mysqlTable("context_packages", {
+  id: int("id").autoincrement().primaryKey(),
+  projectId: int("project_id").notNull().references(() => projects.id, { onDelete: "cascade" }),
+  taskId: int("task_id").references(() => tasks.id, { onDelete: "set null" }),
+  title: varchar("title", { length: 255 }).notNull(),
+  sourceRefs: text("source_refs").notNull(),
+  redactionSummary: text("redaction_summary").notNull(),
+  tokenEstimate: int("token_estimate").default(0).notNull(),
+  status: mysqlEnum("status", contextPackageStatusValues).default("draft").notNull(),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().onUpdateNow().notNull(),
+}, (table) => [
+  index("context_packages_project_created_idx").on(table.projectId, table.createdAt),
+]);
+
+export const projectReports = mysqlTable("project_reports", {
+  id: int("id").autoincrement().primaryKey(),
+  projectId: int("project_id").notNull().references(() => projects.id, { onDelete: "cascade" }),
+  kind: mysqlEnum("kind", projectReportKindValues).notNull(),
+  status: mysqlEnum("status", projectReportStatusValues).default("draft").notNull(),
+  summary: text("summary").notNull(),
+  completedWork: text("completed_work").notNull(),
+  evidenceSummary: text("evidence_summary").notNull(),
+  riskSummary: text("risk_summary").notNull(),
+  nextStep: text("next_step").notNull(),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  finalizedAt: timestamp("finalized_at"),
+}, (table) => [
+  index("project_reports_project_created_idx").on(table.projectId, table.createdAt),
 ]);
 
 export const decisions = mysqlTable("decisions", {
@@ -427,6 +533,79 @@ export const modelUsage = mysqlTable("model_usage", {
   createdAt: timestamp("created_at").defaultNow().notNull(),
 }, (table) => [
   index("model_usage_project_created_idx").on(table.projectId, table.createdAt),
+]);
+
+export const modelCostReservations = mysqlTable("model_cost_reservations", {
+  id: int("id").autoincrement().primaryKey(),
+  projectId: int("project_id").notNull().references(() => projects.id, { onDelete: "cascade" }),
+  taskId: int("task_id").references(() => tasks.id, { onDelete: "set null" }),
+  role: mysqlEnum("role", agentModelRoleValues).notNull(),
+  model: varchar("model", { length: 128 }).notNull(),
+  reservedAmount: decimal("reserved_amount", { precision: 12, scale: 4 }).notNull(),
+  status: mysqlEnum("status", modelCostReservationStatusValues).default("reserved").notNull(),
+  expiresAt: timestamp("expires_at").notNull(),
+  settledAt: timestamp("settled_at"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+}, (table) => [
+  index("model_cost_reservations_project_status_idx").on(table.projectId, table.status),
+  index("model_cost_reservations_expires_idx").on(table.expiresAt),
+]);
+
+export const agentModelRuns = mysqlTable("agent_model_runs", {
+  id: int("id").autoincrement().primaryKey(),
+  projectId: int("project_id").notNull().references(() => projects.id, { onDelete: "cascade" }),
+  taskId: int("task_id").references(() => tasks.id, { onDelete: "set null" }),
+  contextPackageId: int("context_package_id").notNull().references(() => contextPackages.id, { onDelete: "restrict" }),
+  agentId: int("agent_id").references(() => agents.id, { onDelete: "set null" }),
+  reservationId: int("reservation_id").notNull().references(() => modelCostReservations.id, { onDelete: "restrict" }),
+  role: mysqlEnum("role", agentModelRoleValues).notNull(),
+  model: varchar("model", { length: 128 }).notNull(),
+  status: mysqlEnum("status", agentModelRunStatusValues).default("reserved").notNull(),
+  inputSummary: text("input_summary").notNull(),
+  outputJson: text("output_json"),
+  outputSummary: text("output_summary"),
+  errorSummary: text("error_summary"),
+  attemptNumber: int("attempt_number").default(1).notNull(),
+  startedAt: timestamp("started_at"),
+  completedAt: timestamp("completed_at"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+}, (table) => [
+  index("agent_model_runs_project_created_idx").on(table.projectId, table.createdAt),
+  index("agent_model_runs_task_role_created_idx").on(table.taskId, table.role, table.createdAt),
+  index("agent_model_runs_context_idx").on(table.contextPackageId),
+]);
+
+export const projectRepositoryLinks = mysqlTable("project_repository_links", {
+  id: int("id").autoincrement().primaryKey(),
+  projectId: int("project_id").notNull().references(() => projects.id, { onDelete: "cascade" }).unique(),
+  runnerId: int("runner_id").references(() => localRunners.id, { onDelete: "set null" }),
+  remoteUrl: varchar("remote_url", { length: 512 }),
+  repositoryName: varchar("repository_name", { length: 255 }),
+  defaultBranch: varchar("default_branch", { length: 128 }).default("main").notNull(),
+  status: mysqlEnum("status", repositoryLinkStatusValues).default("unlinked").notNull(),
+  lastScannedAt: timestamp("last_scanned_at"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().onUpdateNow().notNull(),
+}, (table) => [
+  index("project_repository_links_runner_idx").on(table.runnerId),
+]);
+
+export const repositoryScans = mysqlTable("repository_scans", {
+  id: int("id").autoincrement().primaryKey(),
+  projectId: int("project_id").notNull().references(() => projects.id, { onDelete: "cascade" }),
+  runnerId: int("runner_id").notNull().references(() => localRunners.id, { onDelete: "cascade" }),
+  displayName: varchar("display_name", { length: 255 }).notNull(),
+  fileCount: int("file_count").default(0).notNull(),
+  directoryCount: int("directory_count").default(0).notNull(),
+  languageSummary: text("language_summary").notNull(),
+  manifestSummary: text("manifest_summary").notNull(),
+  testSummary: text("test_summary").notNull(),
+  sensitiveSummary: text("sensitive_summary").notNull(),
+  status: mysqlEnum("status", repositoryScanStatusValues).default("reported").notNull(),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+}, (table) => [
+  index("repository_scans_project_created_idx").on(table.projectId, table.createdAt),
+  index("repository_scans_runner_created_idx").on(table.runnerId, table.createdAt),
 ]);
 
 export type User = typeof users.$inferSelect;

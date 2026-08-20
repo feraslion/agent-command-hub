@@ -6,6 +6,8 @@ import { protectedProcedure, publicProcedure, router } from "./_core/trpc";
 import * as db from "./db";
 import { getDryWorkerLoopStatus } from "./dry-worker";
 import { composeAgentSystemPrompt, promptTemplateKeyValues, promptTemplateLibrary, promptTemplateLocaleValues } from "./prompt-library";
+import { runGovernedAgentRole } from "./agent-model-service";
+import { agentModelRoles } from "../lib/agent-model-policy";
 
 const projectIdInput = z.object({ projectId: z.number().int().positive() });
 const taskStatus = z.enum(["pending", "queued", "running", "verifying", "completed", "failed", "debugging", "retrying", "cancelled"]);
@@ -52,8 +54,61 @@ export const appRouter = router({
       stage: z.string().trim().min(2).max(128).optional(),
       priority: z.enum(["low", "medium", "high", "critical"]).optional(),
       assignedAgentId: z.number().int().positive().optional(),
+      workPlanId: z.number().int().positive().optional(),
     })).mutation(({ ctx, input }) => db.createTaskForProject(ctx.user.id, input)),
     setStatus: protectedProcedure.input(z.object({ projectId: z.number().int().positive(), taskId: z.number().int().positive(), status: taskStatus })).mutation(({ ctx, input }) => db.updateTaskStatus(ctx.user.id, input)),
+  }),
+  governance: router({
+    get: protectedProcedure.input(projectIdInput).query(({ ctx, input }) => db.getProjectGovernanceForOwner(ctx.user.id, input.projectId)),
+    brief: protectedProcedure.input(projectIdInput).query(({ ctx, input }) => db.getProjectBriefForOwner(ctx.user.id, input.projectId)),
+    saveBrief: protectedProcedure.input(projectIdInput.extend({
+      goal: z.string().trim().min(2).max(4000),
+      scope: z.string().trim().max(4000),
+      constraints: z.string().trim().max(4000),
+      assumptions: z.string().trim().max(4000),
+      openQuestions: z.string().trim().max(4000),
+      risks: z.string().trim().max(4000),
+    })).mutation(({ ctx, input }) => db.saveProjectBriefForOwner(ctx.user.id, input)),
+    plans: protectedProcedure.input(projectIdInput).query(({ ctx, input }) => db.listWorkPlansForProject(ctx.user.id, input.projectId)),
+    createPlan: protectedProcedure.input(projectIdInput.extend({
+      title: z.string().trim().min(2).max(255),
+      summary: z.string().trim().min(2).max(8000),
+      status: z.enum(["draft", "review", "approved"]).optional(),
+    })).mutation(({ ctx, input }) => db.createWorkPlanForProject(ctx.user.id, input)),
+    setPlanStatus: protectedProcedure.input(projectIdInput.extend({ workPlanId: z.number().int().positive(), status: z.enum(["draft", "review", "approved", "superseded"]) })).mutation(({ ctx, input }) => db.setWorkPlanStatusForProject(ctx.user.id, input)),
+    criteria: protectedProcedure.input(projectIdInput).query(({ ctx, input }) => db.listTaskAcceptanceCriteriaForProject(ctx.user.id, input.projectId)),
+    createCriterion: protectedProcedure.input(projectIdInput.extend({ taskId: z.number().int().positive(), criterion: z.string().trim().min(2).max(4000) })).mutation(({ ctx, input }) => db.createTaskAcceptanceCriterionForProject(ctx.user.id, input)),
+    resolveCriterion: protectedProcedure.input(projectIdInput.extend({ criterionId: z.number().int().positive(), status: z.enum(["verified", "waived"]), evidenceNote: z.string().trim().max(4000).optional() })).mutation(({ ctx, input }) => db.verifyTaskAcceptanceCriterionForProject(ctx.user.id, input)),
+    dependencies: protectedProcedure.input(projectIdInput).query(({ ctx, input }) => db.listTaskDependenciesForProject(ctx.user.id, input.projectId)),
+    addDependency: protectedProcedure.input(projectIdInput.extend({ taskId: z.number().int().positive(), dependsOnTaskId: z.number().int().positive() })).mutation(({ ctx, input }) => db.addTaskDependencyForProject(ctx.user.id, input)),
+    artifacts: protectedProcedure.input(projectIdInput).query(({ ctx, input }) => db.listArtifactsForProject(ctx.user.id, input.projectId)),
+    registerArtifact: protectedProcedure.input(projectIdInput.extend({
+      taskId: z.number().int().positive().optional(),
+      name: z.string().trim().min(2).max(255),
+      kind: z.string().trim().min(2).max(64),
+      reference: z.string().trim().min(1).max(512),
+      summary: z.string().trim().max(4000).optional(),
+    })).mutation(({ ctx, input }) => db.registerArtifactForProject(ctx.user.id, input)),
+    contextPackages: protectedProcedure.input(projectIdInput).query(({ ctx, input }) => db.listContextPackagesForProject(ctx.user.id, input.projectId)),
+    createContextPackage: protectedProcedure.input(projectIdInput.extend({
+      taskId: z.number().int().positive().optional(),
+      title: z.string().trim().min(2).max(255),
+      includeBrief: z.boolean(),
+      workPlanId: z.number().int().positive().optional(),
+      taskIds: z.array(z.number().int().positive()).max(12),
+      artifactIds: z.array(z.number().int().positive()).max(12),
+      includeRecentEvents: z.boolean().optional(),
+    })).mutation(({ ctx, input }) => db.createContextPackageForProject(ctx.user.id, input)),
+    reports: protectedProcedure.input(projectIdInput).query(({ ctx, input }) => db.listProjectReportsForOwner(ctx.user.id, input.projectId)),
+    createReport: protectedProcedure.input(projectIdInput.extend({ kind: z.enum(["delivery", "blocked"]), finalize: z.boolean().optional() })).mutation(({ ctx, input }) => db.createProjectReportForOwner(ctx.user.id, input)),
+  }),
+  agentModel: router({
+    listRuns: protectedProcedure.input(projectIdInput.extend({ limit: z.number().int().min(1).max(100).optional() })).query(({ ctx, input }) => db.listAgentModelRunsForProject(ctx.user.id, input.projectId, input.limit ?? 50)),
+    run: protectedProcedure.input(projectIdInput.extend({
+      taskId: z.number().int().positive().optional(),
+      contextPackageId: z.number().int().positive(),
+      role: z.enum(agentModelRoles),
+    })).mutation(({ ctx, input }) => runGovernedAgentRole(ctx.user.id, input)),
   }),
   agents: router({
     list: protectedProcedure.input(projectIdInput).query(({ ctx, input }) => db.listProjectAgents(ctx.user.id, input.projectId)),
@@ -89,6 +144,22 @@ export const appRouter = router({
     list: protectedProcedure.query(({ ctx }) => db.listLocalRunnersForOwner(ctx.user.id)),
     createPairing: protectedProcedure.input(z.object({ label: z.string().trim().min(2).max(128) })).mutation(({ ctx, input }) => db.createLocalRunnerPairingForOwner(ctx.user.id, input.label)),
     revoke: protectedProcedure.input(z.object({ runnerId: z.number().int().positive() })).mutation(({ ctx, input }) => db.revokeLocalRunnerForOwner(ctx.user.id, input.runnerId)),
+  }),
+  repositoryScans: router({
+    list: protectedProcedure.input(z.object({ projectId: z.number().int().positive().optional() }).optional()).query(({ ctx, input }) => db.listRepositoryScansForOwner(ctx.user.id, input?.projectId)),
+  }),
+  gitGate: router({
+    boundary: protectedProcedure.query(() => ({ allowed: ["inspect", "request_pull_request"], blocked: ["push", "merge", "force_push", "delete_branch", "change_protection"] })),
+    requestPullRequest: protectedProcedure.input(z.object({
+      projectId: z.number().int().positive(),
+      headBranch: z.string().trim().min(1).max(128),
+      baseBranch: z.string().trim().min(1).max(128),
+      title: z.string().trim().min(2).max(255),
+      summary: z.string().trim().max(4000),
+    })).mutation(({ ctx, input }) => db.requestPullRequestForOwner(ctx.user.id, input)),
+  }),
+  operationalHealth: router({
+    get: protectedProcedure.query(({ ctx }) => db.getOwnerOperationalHealth(ctx.user.id)),
   }),
   approvals: router({
     list: protectedProcedure.input(projectIdInput).query(({ ctx, input }) => db.listProjectApprovals(ctx.user.id, input.projectId)),
@@ -148,7 +219,14 @@ export const appRouter = router({
     status: protectedProcedure.query(({ ctx }) => db.getIsolatedRuntimeStatusForOwner(ctx.user.id)),
     listForOwner: protectedProcedure.query(({ ctx }) => db.listOwnerIsolatedRuntimeRequests(ctx.user.id)),
     listRequests: protectedProcedure.input(projectIdInput.extend({ limit: z.number().int().min(1).max(100).optional() })).query(({ ctx, input }) => db.listIsolatedRuntimeRequestsForProject(ctx.user.id, input.projectId, input.limit ?? 50)),
+    listMultiFileTemplates: protectedProcedure.input(projectIdInput).query(({ ctx, input }) => db.listMultiFileBundleTemplatesForProject(ctx.user.id, input.projectId)),
+    saveMultiFileTemplate: protectedProcedure.input(projectIdInput.extend({
+      name: z.string().trim().min(2).max(80),
+      entryPath: z.string().trim().min(1).max(512),
+      paths: z.array(z.string().trim().min(1).max(512)).min(2).max(24),
+    })).mutation(({ ctx, input }) => db.saveMultiFileBundleTemplateForProject(ctx.user.id, input)),
     requestExecution: protectedProcedure.input(projectIdInput.extend({ targetPath: z.string().trim().min(1).max(512), engineRunId: z.number().int().positive().optional() })).mutation(({ ctx, input }) => db.requestIsolatedRuntimeExecution(ctx.user.id, input)),
+    requestMultiFileExecution: protectedProcedure.input(projectIdInput.extend({ entryPath: z.string().trim().min(1).max(512), paths: z.array(z.string().trim().min(1).max(512)).min(2).max(24), engineRunId: z.number().int().positive().optional() })).mutation(({ ctx, input }) => db.requestMultiFileRuntimeExecution(ctx.user.id, input)),
   }),
   events: router({
     list: protectedProcedure.input(projectIdInput.extend({ limit: z.number().int().min(1).max(200).optional() })).query(({ ctx, input }) => db.listProjectEvents(ctx.user.id, input.projectId, input.limit ?? 50)),

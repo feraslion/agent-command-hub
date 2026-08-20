@@ -6,6 +6,9 @@ default_config="${repository_root}/runner/device/.env.runner"
 config_path="${default_config}"
 once_requested="false"
 check_config="false"
+scan_directory=""
+scan_project=""
+scan_label=""
 positional=()
 
 usage() {
@@ -13,6 +16,7 @@ usage() {
 Usage:
   $0 [--config PATH] [--once]
   $0 [--config PATH] --check-config
+  $0 [--config PATH] --scan-dir DIRECTORY --project PROJECT_ID [--scan-label LABEL]
   $0 SERVER_URL RUNNER_KEY RUNNER_TOKEN [--once]
 
 The default configuration file is: runner/device/.env.runner
@@ -85,6 +89,21 @@ while [[ $# -gt 0 ]]; do
       check_config="true"
       shift
       ;;
+    --scan-dir)
+      [[ $# -ge 2 ]] || usage
+      scan_directory="$2"
+      shift 2
+      ;;
+    --project)
+      [[ $# -ge 2 ]] || usage
+      scan_project="$2"
+      shift 2
+      ;;
+    --scan-label)
+      [[ $# -ge 2 ]] || usage
+      scan_label="$2"
+      shift 2
+      ;;
     --help|-h)
       usage
       ;;
@@ -119,6 +138,14 @@ if [[ "${check_config}" == "true" ]]; then
 fi
 
 command=(node "${repository_root}/runner/local-runner.mjs" --server "${AGENTHUB_SERVER}" --runner "${AGENTHUB_RUNNER_KEY}" --token "${AGENTHUB_RUNNER_TOKEN}")
+if [[ -n "${scan_directory}" || -n "${scan_project}" || -n "${scan_label}" ]]; then
+  [[ -n "${scan_directory}" && -n "${scan_project}" ]] || usage
+  command+=(--scan-dir "${scan_directory}" --project "${scan_project}")
+  if [[ -n "${scan_label}" ]]; then
+    command+=(--scan-label "${scan_label}")
+  fi
+  exec "${command[@]}"
+fi
 if [[ "${AGENTHUB_RUN_ONCE:-false}" == "true" ]]; then
   command+=(--once)
 fi

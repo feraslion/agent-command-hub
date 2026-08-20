@@ -3,17 +3,30 @@ import { and, desc, eq, inArray, lt, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/mysql2";
 import {
   agentPromptAssignments,
+  agentModelRuns,
   agents,
   approvals,
+  artifacts,
+  contextPackages,
   costEntries,
   executionCommands,
   executionEvents,
   executionPlans,
+  isolatedRuntimeBundles,
   isolatedRuntimeRequests,
   localRunners,
+  multiFileBundleTemplates,
+  modelCostReservations,
+  modelUsage,
+  projectBriefs,
+  projectReports,
   projects,
+  projectRepositoryLinks,
+  repositoryScans,
   sandboxChecks,
   sensitiveWorkspaceChanges,
+  taskAcceptanceCriteria,
+  taskDependencies,
   type promptTemplateKeyValues,
   type promptTemplateLocaleValues,
   taskStatusValues,
@@ -24,6 +37,7 @@ import {
   type User,
   users,
   workerSettings,
+  workPlans,
   workspaceAuditLogs,
   workspaceFiles,
   workspaces,
@@ -33,6 +47,11 @@ import { sandboxGateDetail, sandboxGateKinds, sandboxGateTitle } from "./sandbox
 import { assessSensitiveWorkspaceChange } from "../lib/sensitive-workspace-policy";
 import { assertWorkspaceContent, normalizeWorkspacePath, WorkspacePathError } from "./workspace-policy";
 import { assertLocalRunnerExecutable, truncateRunnerOutput } from "./local-runner-policy";
+import { assertMultiFileBundle } from "./multi-file-runner-policy";
+import { broadcastRuntimeUpdate } from "./runtime-realtime";
+import { buildProjectReportDraft, estimateContextTokens, getCriticalPathTaskIds, normalizeContextSourceRefs, type ContextSourceRef, wouldCreateDependencyCycle } from "../lib/project-governance";
+import { modelRolePolicies, type AgentModelRole } from "../lib/agent-model-policy";
+import { validatePullRequestDraft, type PullRequestDraft } from "../lib/git-pr-policy";
 
 let _db: ReturnType<typeof drizzle> | null = null;
 
@@ -433,7 +452,85 @@ export async function heartbeatLocalRunner(input: { runnerKey: string; token: st
     capabilities: input.capabilities ? JSON.stringify(input.capabilities) : runner.capabilities,
     lastHeartbeatAt: new Date(),
   }).where(eq(localRunners.id, runner.id));
+  broadcastRuntimeUpdate(runner.ownerId, "runner");
   return (await db.select().from(localRunners).where(eq(localRunners.id, runner.id)).limit(1))[0];
+}
+
+export type RepositoryScanSummary = {
+  displayName: string;
+  fileCount: number;
+  directoryCount: number;
+  languages: Record<string, number>;
+  manifests: string[];
+  testSignals: string[];
+  sensitiveSignals: string[];
+};
+
+export async function reportRepositoryScanFromRunner(input: { runnerKey: string; token: string; projectId: number; summary: RepositoryScanSummary }) {
+  const runner = await authenticateLocalRunner(input);
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+  const [project] = await db.select().from(projects).where(and(eq(projects.id, input.projectId), eq(projects.ownerId, runner.ownerId))).limit(1);
+  if (!project) throw new Error("Project not found or access denied");
+
+  const now = new Date();
+  await db.insert(projectRepositoryLinks).values({
+    projectId: project.id,
+    runnerId: runner.id,
+    repositoryName: input.summary.displayName,
+    status: "scanned",
+    lastScannedAt: now,
+  }).onDuplicateKeyUpdate({
+    set: {
+      runnerId: runner.id,
+      repositoryName: input.summary.displayName,
+      status: "scanned",
+      lastScannedAt: now,
+    },
+  });
+
+  const [result] = await db.insert(repositoryScans).values({
+    projectId: project.id,
+    runnerId: runner.id,
+    displayName: input.summary.displayName,
+    fileCount: input.summary.fileCount,
+    directoryCount: input.summary.directoryCount,
+    languageSummary: JSON.stringify(input.summary.languages),
+    manifestSummary: JSON.stringify(input.summary.manifests),
+    testSummary: JSON.stringify(input.summary.testSignals),
+    sensitiveSummary: JSON.stringify(input.summary.sensitiveSignals),
+  });
+  broadcastRuntimeUpdate(runner.ownerId, "runner");
+  return (await db.select().from(repositoryScans).where(eq(repositoryScans.id, Number(result.insertId))).limit(1))[0];
+}
+
+export async function listRepositoryScansForOwner(userId: number, projectId?: number) {
+  const db = await getDb();
+  if (!db) return [];
+  const rows = await db.select({
+    scan: repositoryScans,
+    project: { id: projects.id, name: projects.name, code: projects.code },
+    runner: { id: localRunners.id, label: localRunners.label, runnerKey: localRunners.runnerKey },
+  }).from(repositoryScans)
+    .innerJoin(projects, eq(repositoryScans.projectId, projects.id))
+    .innerJoin(localRunners, eq(repositoryScans.runnerId, localRunners.id))
+    .where(projectId ? and(eq(projects.ownerId, userId), eq(projects.id, projectId)) : eq(projects.ownerId, userId))
+    .orderBy(desc(repositoryScans.createdAt))
+    .limit(30);
+  return rows;
+}
+
+export async function requestPullRequestForOwner(userId: number, draft: PullRequestDraft) {
+  const normalized = validatePullRequestDraft(draft);
+  const detail = `طلب مراجعة Pull Request فقط: ${normalized.headBranch} ← ${normalized.baseBranch}.${normalized.summary ? ` ${normalized.summary}` : ""} لن تنفذ المنصة دفعاً أو دمجاً أو حذفاً؛ بعد الاعتماد يلزم Runner محلي وخطوة منفصلة مصرح بها.`;
+  return createApprovalRequest(userId, {
+    projectId: normalized.projectId,
+    requestedBy: "Git PR Gate",
+    title: normalized.title,
+    detail,
+    impact: "مراجعة تغيير عبر Pull Request فقط؛ لا يوجد دمج أو دفع تلقائي.",
+    level: "approval",
+  });
 }
 
 export async function claimLocalRuntimeRequest(input: { runnerKey: string; token: string }) {
@@ -450,17 +547,24 @@ export async function claimLocalRuntimeRequest(input: { runnerKey: string; token
     eq(isolatedRuntimeRequests.status, "queued"),
   ));
   if (Number(claim.affectedRows ?? 0) !== 1) return null;
-  const [file] = await db.select({ content: workspaceFiles.content }).from(workspaceFiles).where(and(
-    eq(workspaceFiles.workspaceId, candidate.workspaceId),
-    eq(workspaceFiles.path, candidate.targetPath),
-  )).limit(1);
-  if (!file) {
-    await db.update(isolatedRuntimeRequests).set({ status: "failed", reason: "تعذر العثور على ملف Workspace عند الحجز.", completedAt: new Date() }).where(eq(isolatedRuntimeRequests.id, candidate.id));
-    throw new Error("Workspace file no longer exists");
-  }
-  let executable: ReturnType<typeof assertLocalRunnerExecutable>;
+  let outbound: { requestId: number; targetPath: string; profile: "node_script" | "typescript_lockfile" | "typescript_multi_file"; content?: string; files?: { path: string; content: string }[] };
   try {
-    executable = assertLocalRunnerExecutable(candidate.targetPath, file.content);
+    if (candidate.profile === "typescript_multi_file") {
+      const [bundleRecord] = await db.select().from(isolatedRuntimeBundles).where(eq(isolatedRuntimeBundles.requestId, candidate.id)).limit(1);
+      if (!bundleRecord) throw new Error("تعذر العثور على حزمة الملفات المتعددة عند الحجز.");
+      const parsedFiles: unknown = JSON.parse(bundleRecord.filesJson);
+      if (!Array.isArray(parsedFiles)) throw new Error("صيغة حزمة الملفات المتعددة غير صالحة.");
+      const bundle = assertMultiFileBundle(bundleRecord.entryPath, parsedFiles as { path: string; content: string }[]);
+      outbound = { requestId: candidate.id, targetPath: bundle.entryPath, profile: "typescript_multi_file", files: bundle.files };
+    } else {
+      const [file] = await db.select({ content: workspaceFiles.content }).from(workspaceFiles).where(and(
+        eq(workspaceFiles.workspaceId, candidate.workspaceId),
+        eq(workspaceFiles.path, candidate.targetPath),
+      )).limit(1);
+      if (!file) throw new Error("تعذر العثور على ملف Workspace عند الحجز.");
+      const executable = assertLocalRunnerExecutable(candidate.targetPath, file.content);
+      outbound = { requestId: candidate.id, targetPath: executable.normalizedPath, profile: executable.profile, content: file.content };
+    }
   } catch (error) {
     const detail = error instanceof Error ? error.message : "رفضت سياسة Runner محتوى الملف بعد الحجز.";
     await db.update(isolatedRuntimeRequests).set({ status: "failed", reason: detail, completedAt: new Date() }).where(eq(isolatedRuntimeRequests.id, candidate.id));
@@ -469,9 +573,10 @@ export async function claimLocalRuntimeRequest(input: { runnerKey: string; token
     throw error;
   }
   await db.update(localRunners).set({ status: "busy", lastHeartbeatAt: new Date() }).where(eq(localRunners.id, runner.id));
+  broadcastRuntimeUpdate(runner.ownerId, "request");
   await recordWorkspaceAudit(candidate.workspaceId, { actor: runner.runnerKey, action: "sandbox_checked", path: candidate.targetPath, detail: "حجز Runner محلي طلباً معتمداً للتنفيذ داخل حاوية مقيدة." });
   await recordExecutionEvent(runner.ownerId, candidate.projectId, { actor: runner.runnerKey, type: "ISOLATED_RUNTIME_CLAIMED", label: "حجز Runner محلي طلب تنفيذ", detail: candidate.targetPath });
-  return { requestId: candidate.id, targetPath: executable.normalizedPath, profile: executable.profile, content: file.content };
+  return outbound;
 }
 
 export async function reportLocalRuntimeRequest(input: { runnerKey: string; token: string; requestId: number; status: "completed" | "failed"; exitCode: number; stdout?: string; stderr?: string; durationMs: number }) {
@@ -497,6 +602,7 @@ export async function reportLocalRuntimeRequest(input: { runnerKey: string; toke
     completedAt: new Date(),
   }).where(eq(isolatedRuntimeRequests.id, request.id));
   await db.update(localRunners).set({ status: "ready", lastHeartbeatAt: new Date() }).where(eq(localRunners.id, runner.id));
+  broadcastRuntimeUpdate(runner.ownerId, "request");
   await recordWorkspaceAudit(request.workspaceId, { actor: runner.runnerKey, action: "sandbox_checked", path: request.targetPath, detail: status === "completed" ? "اكتمل التنفيذ المحدود داخل الحاوية بنجاح." : "انتهى التنفيذ المحدود داخل الحاوية بفشل؛ راجع المخرجات المقتطعة." });
   await recordExecutionEvent(runner.ownerId, request.projectId, { actor: runner.runnerKey, type: status === "completed" ? "ISOLATED_RUNTIME_COMPLETED" : "ISOLATED_RUNTIME_FAILED", label: status === "completed" ? "اكتمل تنفيذ معزول" : "فشل تنفيذ معزول", detail: `${request.targetPath} · exit ${input.exitCode}` });
   return (await db.select().from(isolatedRuntimeRequests).where(eq(isolatedRuntimeRequests.id, request.id)).limit(1))[0];
@@ -520,6 +626,33 @@ export async function listOwnerIsolatedRuntimeRequests(userId: number, limit = 5
     .where(eq(projects.ownerId, userId))
     .orderBy(desc(isolatedRuntimeRequests.createdAt))
     .limit(limit);
+}
+
+/** يلخص مؤشرات الصحة من بيانات المالك فقط، ولا يغير أي حالة تشغيلية. */
+export async function getOwnerOperationalHealth(userId: number) {
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+  const since = new Date(Date.now() - 24 * 60 * 60 * 1000);
+  const [runtimeRecords, runners, worker, pendingApprovals, ownedProjects, ownerCosts] = await Promise.all([
+    db.select({ status: isolatedRuntimeRequests.status, createdAt: isolatedRuntimeRequests.createdAt, completedAt: isolatedRuntimeRequests.completedAt }).from(isolatedRuntimeRequests).innerJoin(projects, eq(isolatedRuntimeRequests.projectId, projects.id)).where(eq(projects.ownerId, userId)),
+    listLocalRunnersForOwner(userId),
+    getWorkerSettingsForOwner(userId),
+    db.select({ id: approvals.id }).from(approvals).innerJoin(projects, eq(approvals.projectId, projects.id)).where(and(eq(projects.ownerId, userId), eq(approvals.status, "pending"))),
+    db.select({ id: projects.id, budgetLimit: projects.budgetLimit }).from(projects).where(eq(projects.ownerId, userId)),
+    db.select({ amount: costEntries.amount }).from(costEntries).innerJoin(projects, eq(costEntries.projectId, projects.id)).where(eq(projects.ownerId, userId)),
+  ]);
+  const spent = ownerCosts.reduce((total, entry) => total + Number(entry.amount), 0);
+  const budget = ownedProjects.reduce((total, project) => total + Number(project.budgetLimit), 0);
+  return {
+    queued: runtimeRecords.filter((record) => record.status === "queued").length,
+    activeLeases: runtimeRecords.filter((record) => record.status === "claimed").length,
+    failedLast24h: runtimeRecords.filter((record) => (record.status === "failed" || record.status === "blocked") && new Date(record.completedAt ?? record.createdAt).getTime() >= since.getTime()).length,
+    pendingApprovals: pendingApprovals.length,
+    readyRunners: runners.filter((runner) => runner.status === "ready").length,
+    workerStatus: worker.runtimeStatus,
+    workerHeartbeatAt: worker.lastHeartbeatAt,
+    budgetPercent: budget > 0 ? Math.min(100, Math.round((spent / budget) * 100)) : 0,
+  };
 }
 
 export async function requestIsolatedRuntimeExecution(userId: number, input: { projectId: number; targetPath: string; engineRunId?: number }) {
@@ -549,6 +682,7 @@ export async function requestIsolatedRuntimeExecution(userId: number, input: { p
     });
     await recordWorkspaceAudit(workspace.id, { actor: "Isolated Runtime Gate", action: "tool_rejected", path, detail });
     await recordExecutionEvent(userId, input.projectId, { actor: "Isolated Runtime Gate", type: "ISOLATED_RUNTIME_RUNNER_REQUIRED", label: "حُجب التنفيذ بانتظار Runner متوافق", detail: path });
+    broadcastRuntimeUpdate(userId, "request");
     return (await db.select().from(isolatedRuntimeRequests).where(eq(isolatedRuntimeRequests.id, Number(result.insertId))).limit(1))[0];
   }
   const approval = await createApprovalRequest(userId, {
@@ -573,7 +707,113 @@ export async function requestIsolatedRuntimeExecution(userId: number, input: { p
   });
   await recordWorkspaceAudit(workspace.id, { actor: "Isolated Runtime Gate", action: "gate_requested", path, detail: "أُنشئ طلب موافقة لتنفيذ محدود عبر Runner محلي؛ لم تُشغّل شيفرة بعد." });
   await recordExecutionEvent(userId, input.projectId, { actor: "Isolated Runtime Gate", type: "ISOLATED_RUNTIME_APPROVAL_REQUESTED", label: "طلب موافقة لتنفيذ معزول", detail: path });
+  broadcastRuntimeUpdate(userId, "approval");
   return (await db.select().from(isolatedRuntimeRequests).where(eq(isolatedRuntimeRequests.id, Number(result.insertId))).limit(1))[0];
+}
+
+export async function requestMultiFileRuntimeExecution(userId: number, input: { projectId: number; entryPath: string; paths: string[]; engineRunId?: number }) {
+  const ensured = await ensureWorkspaceForProject(userId, input.projectId);
+  const workspace = ensured.workspace;
+  const requestedPaths = [...new Set(input.paths.map(normalizeWorkspacePath))];
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+  const workspaceBundle = await db.select({ path: workspaceFiles.path, content: workspaceFiles.content }).from(workspaceFiles).where(and(
+    eq(workspaceFiles.workspaceId, workspace.id),
+    inArray(workspaceFiles.path, requestedPaths),
+  ));
+  if (workspaceBundle.length !== requestedPaths.length) throw new Error("يجب أن تكون جميع ملفات الحزمة موجودة في Workspace.");
+  const bundle = assertMultiFileBundle(normalizeWorkspacePath(input.entryPath), workspaceBundle);
+  const runners = await db.select().from(localRunners).where(eq(localRunners.ownerId, userId)).orderBy(desc(localRunners.updatedAt));
+  const runner = runners.find((candidate) => candidate.status === "ready" && isRunnerFresh(candidate.lastHeartbeatAt) && supportsRunnerProfile(candidate, "typescript_multi_file"));
+  const requestValues = {
+    projectId: input.projectId,
+    workspaceId: workspace.id,
+    engineRunId: input.engineRunId ?? null,
+    requestedByUserId: userId,
+    targetPath: bundle.entryPath,
+    profile: "typescript_multi_file",
+  } as const;
+  if (!runner) {
+    const detail = "لا يوجد Runner محلي متصل يعلن دعم حزمة TypeScript متعددة الملفات. شغّل العميل المحدث على جهاز يملك Docker؛ لن ينفذ التطبيق أي شيفرة قبل ذلك.";
+    const [result] = await db.insert(isolatedRuntimeRequests).values({ ...requestValues, status: "environment_required", reason: detail });
+    await db.insert(isolatedRuntimeBundles).values({ requestId: Number(result.insertId), entryPath: bundle.entryPath, filesJson: JSON.stringify(bundle.files), totalBytes: bundle.totalBytes });
+    await recordWorkspaceAudit(workspace.id, { actor: "Multi-file Runtime Gate", action: "tool_rejected", path: bundle.entryPath, detail });
+    await recordExecutionEvent(userId, input.projectId, { actor: "Multi-file Runtime Gate", type: "ISOLATED_RUNTIME_RUNNER_REQUIRED", label: "حُجب تنفيذ متعدد الملفات بانتظار Runner متوافق", detail: bundle.entryPath });
+    broadcastRuntimeUpdate(userId, "request");
+    return (await db.select().from(isolatedRuntimeRequests).where(eq(isolatedRuntimeRequests.id, Number(result.insertId))).limit(1))[0];
+  }
+  const approval = await createApprovalRequest(userId, {
+    projectId: input.projectId,
+    requestedBy: "Multi-file Runtime Gate",
+    title: `تنفيذ TypeScript متعدد الملفات (${bundle.files.length})`,
+    detail: `سيشغّل Runner المحلي ${runner.label} حزمة تضم ${bundle.files.length} ملفاً من Workspace داخل حاوية بلا شبكة وبحد أقصى 20 ثانية و384MB. لا يُسمح إلا بالاستيراد النسبي، ولا توجد حزم خارجية أو وصول إلى النظام.`,
+    impact: "تنفيذ شيفرة متعددة الملفات داخل Docker محلي مقيد بعد اعتماد صريح.",
+    level: "approval",
+  });
+  const [result] = await db.insert(isolatedRuntimeRequests).values({ ...requestValues, approvalId: approval.id, runnerId: runner.id, status: "awaiting_approval", reason: "ينتظر موافقة صريحة قبل إتاحة الحزمة متعددة الملفات إلى Runner المحلي." });
+  await db.insert(isolatedRuntimeBundles).values({ requestId: Number(result.insertId), entryPath: bundle.entryPath, filesJson: JSON.stringify(bundle.files), totalBytes: bundle.totalBytes });
+  await recordWorkspaceAudit(workspace.id, { actor: "Multi-file Runtime Gate", action: "gate_requested", path: bundle.entryPath, detail: "أُنشئ طلب موافقة لتنفيذ حزمة TypeScript متعددة الملفات؛ لم تُشغّل الشيفرة بعد." });
+  await recordExecutionEvent(userId, input.projectId, { actor: "Multi-file Runtime Gate", type: "ISOLATED_RUNTIME_APPROVAL_REQUESTED", label: "طلب موافقة لتنفيذ متعدد الملفات", detail: bundle.entryPath });
+  broadcastRuntimeUpdate(userId, "approval");
+  return (await db.select().from(isolatedRuntimeRequests).where(eq(isolatedRuntimeRequests.id, Number(result.insertId))).limit(1))[0];
+}
+
+function parseMultiFileTemplatePaths(pathsJson: string) {
+  try {
+    const parsed: unknown = JSON.parse(pathsJson);
+    return Array.isArray(parsed) ? parsed.filter((path): path is string => typeof path === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+export async function listMultiFileBundleTemplatesForProject(userId: number, projectId: number) {
+  const { db } = await requireOwnedProject(userId, projectId);
+  const templates = await db.select().from(multiFileBundleTemplates).where(eq(multiFileBundleTemplates.projectId, projectId)).orderBy(desc(multiFileBundleTemplates.updatedAt));
+  return templates.map((template) => ({ ...template, paths: parseMultiFileTemplatePaths(template.pathsJson) }));
+}
+
+export async function saveMultiFileBundleTemplateForProject(userId: number, input: { projectId: number; name: string; entryPath: string; paths: string[] }) {
+  const ensured = await ensureWorkspaceForProject(userId, input.projectId);
+  const workspace = ensured.workspace;
+  const name = input.name.trim();
+  if (!name) throw new Error("اسم قالب الحزمة مطلوب.");
+  const entryPath = normalizeWorkspacePath(input.entryPath);
+  const requestedPaths = [...new Set(input.paths.map(normalizeWorkspacePath))];
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+  const workspaceBundle = await db.select({ path: workspaceFiles.path, content: workspaceFiles.content }).from(workspaceFiles).where(and(
+    eq(workspaceFiles.workspaceId, workspace.id),
+    inArray(workspaceFiles.path, requestedPaths),
+  ));
+  if (workspaceBundle.length !== requestedPaths.length) throw new Error("لا يمكن حفظ قالب يحتوي ملفات غير موجودة في Workspace.");
+  const bundle = assertMultiFileBundle(entryPath, workspaceBundle);
+  const pathsJson = JSON.stringify(bundle.files.map((file) => file.path));
+  await db.insert(multiFileBundleTemplates).values({
+    projectId: input.projectId,
+    name,
+    entryPath: bundle.entryPath,
+    pathsJson,
+  }).onDuplicateKeyUpdate({
+    set: { entryPath: bundle.entryPath, pathsJson, updatedAt: new Date() },
+  });
+  await recordWorkspaceAudit(workspace.id, {
+    actor: "Multi-file Template",
+    action: "gate_requested",
+    path: bundle.entryPath,
+    detail: `حُفظ قالب حزمة TypeScript باسم «${name}» يضم ${bundle.files.length} ملفات؛ لا ينشئ ذلك طلب تنفيذ.`,
+  });
+  await recordExecutionEvent(userId, input.projectId, {
+    actor: "Multi-file Template",
+    type: "MULTI_FILE_TEMPLATE_SAVED",
+    label: "حُفظ قالب حزمة TypeScript",
+    detail: `${name} · ${bundle.files.length} ملفات`,
+  });
+  const [template] = await db.select().from(multiFileBundleTemplates).where(and(
+    eq(multiFileBundleTemplates.projectId, input.projectId),
+    eq(multiFileBundleTemplates.name, name),
+  )).limit(1);
+  return { ...template, paths: parseMultiFileTemplatePaths(template.pathsJson) };
 }
 
 export async function getWorkerSettingsForOwner(userId: number) {
@@ -871,10 +1111,15 @@ export async function listProjectTasks(userId: number, projectId: number) {
   return db.select().from(tasks).where(eq(tasks.projectId, projectId)).orderBy(desc(tasks.updatedAt));
 }
 
-export async function createTaskForProject(userId: number, input: { projectId: number; title: string; description?: string; stage?: string; priority?: "low" | "medium" | "high" | "critical"; assignedAgentId?: number }) {
+export async function createTaskForProject(userId: number, input: { projectId: number; workPlanId?: number; title: string; description?: string; stage?: string; priority?: "low" | "medium" | "high" | "critical"; assignedAgentId?: number }) {
   const { db } = await requireOwnedProject(userId, input.projectId);
+  if (input.workPlanId) {
+    const [plan] = await db.select({ id: workPlans.id }).from(workPlans).where(and(eq(workPlans.id, input.workPlanId), eq(workPlans.projectId, input.projectId))).limit(1);
+    if (!plan) throw new Error("Work plan not found for this project");
+  }
   const [result] = await db.insert(tasks).values({
     projectId: input.projectId,
+    workPlanId: input.workPlanId ?? null,
     assignedAgentId: input.assignedAgentId ?? null,
     title: input.title,
     description: input.description ?? null,
@@ -954,6 +1199,280 @@ export async function createProjectAgent(userId: number, input: { projectId: num
 export async function listProjectEvents(userId: number, projectId: number, limit = 50) {
   const { db } = await requireOwnedProject(userId, projectId);
   return db.select().from(executionEvents).where(eq(executionEvents.projectId, projectId)).orderBy(desc(executionEvents.createdAt)).limit(limit);
+}
+
+export async function getProjectBriefForOwner(userId: number, projectId: number) {
+  const { db } = await requireOwnedProject(userId, projectId);
+  const [brief] = await db.select().from(projectBriefs).where(eq(projectBriefs.projectId, projectId)).limit(1);
+  return brief ?? null;
+}
+
+export async function saveProjectBriefForOwner(userId: number, input: { projectId: number; goal: string; scope: string; constraints: string; assumptions: string; openQuestions: string; risks: string }) {
+  const { db } = await requireOwnedProject(userId, input.projectId);
+  await db.insert(projectBriefs).values({
+    projectId: input.projectId,
+    goal: input.goal,
+    scope: input.scope,
+    constraints: input.constraints,
+    assumptions: input.assumptions,
+    openQuestions: input.openQuestions,
+    risks: input.risks,
+  }).onDuplicateKeyUpdate({ set: { goal: input.goal, scope: input.scope, constraints: input.constraints, assumptions: input.assumptions, openQuestions: input.openQuestions, risks: input.risks } });
+  const brief = await getProjectBriefForOwner(userId, input.projectId);
+  await recordExecutionEvent(userId, input.projectId, { actor: "مالك المشروع", type: "PROJECT_BRIEF_SAVED", label: "تم حفظ موجز المشروع", detail: "تم تحديث الهدف والنطاق والقيود." });
+  return brief;
+}
+
+export async function listWorkPlansForProject(userId: number, projectId: number) {
+  const { db } = await requireOwnedProject(userId, projectId);
+  return db.select().from(workPlans).where(eq(workPlans.projectId, projectId)).orderBy(desc(workPlans.updatedAt));
+}
+
+export async function createWorkPlanForProject(userId: number, input: { projectId: number; title: string; summary: string; status?: "draft" | "review" | "approved" }) {
+  const { db } = await requireOwnedProject(userId, input.projectId);
+  const [result] = await db.insert(workPlans).values({ projectId: input.projectId, title: input.title, summary: input.summary, status: input.status ?? "draft" });
+  const [plan] = await db.select().from(workPlans).where(eq(workPlans.id, Number(result.insertId))).limit(1);
+  await recordExecutionEvent(userId, input.projectId, { actor: "مالك المشروع", type: "WORK_PLAN_CREATED", label: "تم إنشاء خطة عمل", detail: plan.title });
+  return plan;
+}
+
+export async function setWorkPlanStatusForProject(userId: number, input: { projectId: number; workPlanId: number; status: "draft" | "review" | "approved" | "superseded" }) {
+  const { db } = await requireOwnedProject(userId, input.projectId);
+  const [plan] = await db.select().from(workPlans).where(and(eq(workPlans.id, input.workPlanId), eq(workPlans.projectId, input.projectId))).limit(1);
+  if (!plan) throw new Error("Work plan not found");
+  await db.update(workPlans).set({ status: input.status }).where(eq(workPlans.id, plan.id));
+  const [updated] = await db.select().from(workPlans).where(eq(workPlans.id, plan.id)).limit(1);
+  await recordExecutionEvent(userId, input.projectId, { actor: "مالك المشروع", type: "WORK_PLAN_STATUS_CHANGED", label: "تغيرت حالة خطة العمل", detail: `${plan.title} → ${input.status}` });
+  return updated;
+}
+
+export async function listTaskAcceptanceCriteriaForProject(userId: number, projectId: number) {
+  const { db } = await requireOwnedProject(userId, projectId);
+  const projectTasks = await db.select({ id: tasks.id, title: tasks.title }).from(tasks).where(eq(tasks.projectId, projectId));
+  if (!projectTasks.length) return [];
+  const rows = await db.select().from(taskAcceptanceCriteria).where(inArray(taskAcceptanceCriteria.taskId, projectTasks.map((task) => task.id)));
+  const titles = new Map(projectTasks.map((task) => [task.id, task.title]));
+  return rows.map((row) => ({ ...row, taskTitle: titles.get(row.taskId) ?? "مهمة غير معروفة" }));
+}
+
+export async function createTaskAcceptanceCriterionForProject(userId: number, input: { projectId: number; taskId: number; criterion: string }) {
+  const { db } = await requireOwnedProject(userId, input.projectId);
+  const [task] = await db.select().from(tasks).where(and(eq(tasks.id, input.taskId), eq(tasks.projectId, input.projectId))).limit(1);
+  if (!task) throw new Error("Task not found");
+  const [result] = await db.insert(taskAcceptanceCriteria).values({ taskId: task.id, criterion: input.criterion });
+  const [criterion] = await db.select().from(taskAcceptanceCriteria).where(eq(taskAcceptanceCriteria.id, Number(result.insertId))).limit(1);
+  await recordExecutionEvent(userId, input.projectId, { taskId: task.id, actor: "مالك المشروع", type: "DONE_CRITERION_CREATED", label: "تمت إضافة معيار إتمام", detail: `${task.title}: ${input.criterion}` });
+  return criterion;
+}
+
+export async function verifyTaskAcceptanceCriterionForProject(userId: number, input: { projectId: number; criterionId: number; status: "verified" | "waived"; evidenceNote?: string }) {
+  const { db } = await requireOwnedProject(userId, input.projectId);
+  const [criterion] = await db.select().from(taskAcceptanceCriteria).where(eq(taskAcceptanceCriteria.id, input.criterionId)).limit(1);
+  if (!criterion) throw new Error("Acceptance criterion not found");
+  const [task] = await db.select().from(tasks).where(and(eq(tasks.id, criterion.taskId), eq(tasks.projectId, input.projectId))).limit(1);
+  if (!task) throw new Error("Acceptance criterion is outside this project");
+  await db.update(taskAcceptanceCriteria).set({ status: input.status, evidenceNote: input.evidenceNote ?? null, verifiedAt: new Date() }).where(eq(taskAcceptanceCriteria.id, criterion.id));
+  const [updated] = await db.select().from(taskAcceptanceCriteria).where(eq(taskAcceptanceCriteria.id, criterion.id)).limit(1);
+  await recordExecutionEvent(userId, input.projectId, { taskId: task.id, actor: "مالك المشروع", type: "DONE_CRITERION_RESOLVED", label: input.status === "verified" ? "تم التحقق من معيار إتمام" : "تم تجاوز معيار إتمام", detail: `${task.title}: ${criterion.criterion}` });
+  return updated;
+}
+
+export async function listTaskDependenciesForProject(userId: number, projectId: number) {
+  const { db } = await requireOwnedProject(userId, projectId);
+  const projectTasks = await db.select({ id: tasks.id, title: tasks.title, status: tasks.status }).from(tasks).where(eq(tasks.projectId, projectId));
+  if (!projectTasks.length) return { dependencies: [], criticalPathTaskIds: [] as number[] };
+  const taskIds = projectTasks.map((task) => task.id);
+  const rows = await db.select().from(taskDependencies).where(inArray(taskDependencies.taskId, taskIds));
+  const labels = new Map(projectTasks.map((task) => [task.id, task.title]));
+  return {
+    dependencies: rows.map((row) => ({ ...row, taskTitle: labels.get(row.taskId) ?? "مهمة", dependsOnTaskTitle: labels.get(row.dependsOnTaskId) ?? "مهمة" })),
+    criticalPathTaskIds: getCriticalPathTaskIds(projectTasks, rows),
+  };
+}
+
+export async function addTaskDependencyForProject(userId: number, input: { projectId: number; taskId: number; dependsOnTaskId: number }) {
+  const { db } = await requireOwnedProject(userId, input.projectId);
+  const projectTasks = await db.select({ id: tasks.id, title: tasks.title }).from(tasks).where(eq(tasks.projectId, input.projectId));
+  const taskIds = new Set(projectTasks.map((task) => task.id));
+  if (!taskIds.has(input.taskId) || !taskIds.has(input.dependsOnTaskId)) throw new Error("Dependency tasks must belong to this project");
+  const existing = await db.select().from(taskDependencies).where(inArray(taskDependencies.taskId, [...taskIds]));
+  if (wouldCreateDependencyCycle(input.taskId, input.dependsOnTaskId, existing)) throw new Error("Dependency would create a cycle");
+  await db.insert(taskDependencies).values({ taskId: input.taskId, dependsOnTaskId: input.dependsOnTaskId }).onDuplicateKeyUpdate({ set: { taskId: input.taskId } });
+  const labels = new Map(projectTasks.map((task) => [task.id, task.title]));
+  await recordExecutionEvent(userId, input.projectId, { taskId: input.taskId, actor: "مالك المشروع", type: "TASK_DEPENDENCY_ADDED", label: "تمت إضافة اعتماد مهمة", detail: `${labels.get(input.taskId)} يعتمد على ${labels.get(input.dependsOnTaskId)}.` });
+  return listTaskDependenciesForProject(userId, input.projectId);
+}
+
+export async function listArtifactsForProject(userId: number, projectId: number) {
+  const { db } = await requireOwnedProject(userId, projectId);
+  return db.select().from(artifacts).where(eq(artifacts.projectId, projectId)).orderBy(desc(artifacts.createdAt));
+}
+
+export async function registerArtifactForProject(userId: number, input: { projectId: number; taskId?: number; name: string; kind: string; reference: string; summary?: string }) {
+  const { db } = await requireOwnedProject(userId, input.projectId);
+  if (input.taskId) {
+    const [task] = await db.select({ id: tasks.id }).from(tasks).where(and(eq(tasks.id, input.taskId), eq(tasks.projectId, input.projectId))).limit(1);
+    if (!task) throw new Error("Task not found for artifact");
+  }
+  const [result] = await db.insert(artifacts).values({ projectId: input.projectId, taskId: input.taskId ?? null, name: input.name, kind: input.kind, storageKey: input.reference, summary: input.summary ?? null });
+  const [artifact] = await db.select().from(artifacts).where(eq(artifacts.id, Number(result.insertId))).limit(1);
+  await recordExecutionEvent(userId, input.projectId, { taskId: input.taskId, actor: "مالك المشروع", type: "ARTIFACT_REGISTERED", label: "تم تسجيل دليل", detail: `${input.kind}: ${input.name}` });
+  return artifact;
+}
+
+export async function listContextPackagesForProject(userId: number, projectId: number) {
+  const { db } = await requireOwnedProject(userId, projectId);
+  return db.select().from(contextPackages).where(eq(contextPackages.projectId, projectId)).orderBy(desc(contextPackages.createdAt));
+}
+
+export async function createContextPackageForProject(userId: number, input: { projectId: number; taskId?: number; title: string; includeBrief: boolean; workPlanId?: number; taskIds: number[]; artifactIds: number[]; includeRecentEvents?: boolean }) {
+  const { db } = await requireOwnedProject(userId, input.projectId);
+  if (input.taskId) {
+    const [task] = await db.select({ id: tasks.id }).from(tasks).where(and(eq(tasks.id, input.taskId), eq(tasks.projectId, input.projectId))).limit(1);
+    if (!task) throw new Error("Context task not found");
+  }
+  const sourceRefs: ContextSourceRef[] = [];
+  if (input.includeBrief) {
+    const brief = await getProjectBriefForOwner(userId, input.projectId);
+    if (brief) sourceRefs.push({ kind: "brief", id: brief.id, label: "موجز المشروع" });
+  }
+  if (input.workPlanId) {
+    const [plan] = await db.select().from(workPlans).where(and(eq(workPlans.id, input.workPlanId), eq(workPlans.projectId, input.projectId))).limit(1);
+    if (!plan) throw new Error("Work plan not found for context");
+    sourceRefs.push({ kind: "plan", id: plan.id, label: plan.title });
+  }
+  if (input.taskIds.length) {
+    const selectedTasks = await db.select({ id: tasks.id, title: tasks.title }).from(tasks).where(and(eq(tasks.projectId, input.projectId), inArray(tasks.id, input.taskIds)));
+    sourceRefs.push(...selectedTasks.map((task) => ({ kind: "task" as const, id: task.id, label: task.title })));
+  }
+  if (input.artifactIds.length) {
+    const selectedArtifacts = await db.select({ id: artifacts.id, name: artifacts.name }).from(artifacts).where(and(eq(artifacts.projectId, input.projectId), inArray(artifacts.id, input.artifactIds)));
+    sourceRefs.push(...selectedArtifacts.map((artifact) => ({ kind: "artifact" as const, id: artifact.id, label: artifact.name })));
+  }
+  if (input.includeRecentEvents) {
+    const events = await db.select({ id: executionEvents.id, label: executionEvents.label }).from(executionEvents).where(eq(executionEvents.projectId, input.projectId)).orderBy(desc(executionEvents.createdAt)).limit(5);
+    sourceRefs.push(...events.map((event) => ({ kind: "event" as const, id: event.id, label: event.label })));
+  }
+  const normalizedSources = normalizeContextSourceRefs(sourceRefs);
+  if (!normalizedSources.length) throw new Error("Context package requires at least one owned source");
+  const [result] = await db.insert(contextPackages).values({ projectId: input.projectId, taskId: input.taskId ?? null, title: input.title, sourceRefs: JSON.stringify(normalizedSources), redactionSummary: "تحتوي الحزمة على مراجع وملخصات مقتطعة فقط؛ لا تتضمن محتوى Workspace الخام أو أسرار البيئة.", tokenEstimate: estimateContextTokens(normalizedSources) });
+  const [contextPackage] = await db.select().from(contextPackages).where(eq(contextPackages.id, Number(result.insertId))).limit(1);
+  await recordExecutionEvent(userId, input.projectId, { taskId: input.taskId, actor: "مالك المشروع", type: "CONTEXT_PACKAGE_CREATED", label: "تم إنشاء حزمة سياق", detail: `${normalizedSources.length} مراجع منقحة.` });
+  return contextPackage;
+}
+
+export async function listProjectReportsForOwner(userId: number, projectId: number) {
+  const { db } = await requireOwnedProject(userId, projectId);
+  return db.select().from(projectReports).where(eq(projectReports.projectId, projectId)).orderBy(desc(projectReports.createdAt));
+}
+
+export async function createProjectReportForOwner(userId: number, input: { projectId: number; kind: "delivery" | "blocked"; finalize?: boolean }) {
+  const { db, project } = await requireOwnedProject(userId, input.projectId);
+  const projectTasks = await db.select({ title: tasks.title, status: tasks.status }).from(tasks).where(eq(tasks.projectId, input.projectId));
+  const projectArtifacts = await db.select({ name: artifacts.name }).from(artifacts).where(eq(artifacts.projectId, input.projectId));
+  const pendingApprovals = await db.select({ id: approvals.id }).from(approvals).where(and(eq(approvals.projectId, input.projectId), eq(approvals.status, "pending")));
+  const draft = buildProjectReportDraft({
+    projectName: project.name,
+    projectStatus: project.status,
+    completedTaskTitles: projectTasks.filter((task) => task.status === "completed").map((task) => task.title),
+    blockedTaskTitles: projectTasks.filter((task) => ["failed", "cancelled", "debugging"].includes(task.status)).map((task) => task.title),
+    artifactNames: projectArtifacts.map((artifact) => artifact.name),
+    pendingApprovals: pendingApprovals.length,
+    kind: input.kind,
+  });
+  const [result] = await db.insert(projectReports).values({ projectId: input.projectId, kind: input.kind, status: input.finalize ? "final" : "draft", ...draft, finalizedAt: input.finalize ? new Date() : null });
+  const [report] = await db.select().from(projectReports).where(eq(projectReports.id, Number(result.insertId))).limit(1);
+  await recordExecutionEvent(userId, input.projectId, { actor: "مالك المشروع", type: "PROJECT_REPORT_CREATED", label: input.kind === "delivery" ? "تم إنشاء تقرير تسليم" : "تم إنشاء تقرير إيقاف", detail: input.finalize ? "التقرير معلّم كنهائي." : "تم حفظ مسودة التقرير." });
+  return report;
+}
+
+export async function getProjectGovernanceForOwner(userId: number, projectId: number) {
+  const [brief, workPlans, criteria, dependencyGraph, artifacts, contextPackages, reports, timeline] = await Promise.all([
+    getProjectBriefForOwner(userId, projectId),
+    listWorkPlansForProject(userId, projectId),
+    listTaskAcceptanceCriteriaForProject(userId, projectId),
+    listTaskDependenciesForProject(userId, projectId),
+    listArtifactsForProject(userId, projectId),
+    listContextPackagesForProject(userId, projectId),
+    listProjectReportsForOwner(userId, projectId),
+    listProjectEvents(userId, projectId, 50),
+  ]);
+  return { brief, workPlans, criteria, dependencyGraph, artifacts, contextPackages, reports, timeline };
+}
+
+export async function listAgentModelRunsForProject(userId: number, projectId: number, limit = 50) {
+  const { db } = await requireOwnedProject(userId, projectId);
+  return db.select().from(agentModelRuns).where(eq(agentModelRuns.projectId, projectId)).orderBy(desc(agentModelRuns.createdAt)).limit(limit);
+}
+
+export async function getAgentModelRunContextForProject(userId: number, input: { projectId: number; contextPackageId: number; taskId?: number }) {
+  const { db, project } = await requireOwnedProject(userId, input.projectId);
+  const [contextPackage] = await db.select().from(contextPackages).where(and(eq(contextPackages.id, input.contextPackageId), eq(contextPackages.projectId, input.projectId))).limit(1);
+  if (!contextPackage) throw new Error("Context package not found for project");
+  if (input.taskId && contextPackage.taskId && contextPackage.taskId !== input.taskId) throw new Error("Context package belongs to a different task");
+  const task = input.taskId ? (await db.select().from(tasks).where(and(eq(tasks.id, input.taskId), eq(tasks.projectId, input.projectId))).limit(1))[0] : undefined;
+  if (input.taskId && !task) throw new Error("Task not found for model run");
+  const [brief] = await db.select().from(projectBriefs).where(eq(projectBriefs.projectId, input.projectId)).limit(1);
+  return { project, task, contextPackage, brief };
+}
+
+export async function reserveAgentModelRunForProject(userId: number, input: { projectId: number; taskId?: number; contextPackageId: number; role: AgentModelRole; model: string; reservationAmount: number; inputSummary: string }) {
+  const { db, project } = await requireOwnedProject(userId, input.projectId);
+  const now = new Date();
+  await db.update(modelCostReservations).set({ status: "expired" }).where(and(eq(modelCostReservations.projectId, input.projectId), eq(modelCostReservations.status, "reserved"), lt(modelCostReservations.expiresAt, now)));
+  const context = await getAgentModelRunContextForProject(userId, { projectId: input.projectId, contextPackageId: input.contextPackageId, taskId: input.taskId });
+  if (input.role === "debugger") {
+    if (!input.taskId) throw new Error("Debugger requires a task");
+    const [attempts] = await db.select({ count: sql<number>`count(*)` }).from(agentModelRuns).where(and(eq(agentModelRuns.projectId, input.projectId), eq(agentModelRuns.taskId, input.taskId), eq(agentModelRuns.role, "debugger"), inArray(agentModelRuns.status, ["reserved", "running", "completed", "failed"])));
+    if (Number(attempts?.count ?? 0) >= modelRolePolicies.debugger.maxAttempts) throw new Error("Debugger attempt limit reached; owner intervention is required");
+  }
+  const [spentSummary, reservedSummary] = await Promise.all([
+    db.select({ amount: sql<string>`coalesce(sum(${costEntries.amount}), 0)` }).from(costEntries).where(eq(costEntries.projectId, input.projectId)),
+    db.select({ amount: sql<string>`coalesce(sum(${modelCostReservations.reservedAmount}), 0)` }).from(modelCostReservations).where(and(eq(modelCostReservations.projectId, input.projectId), eq(modelCostReservations.status, "reserved"))),
+  ]);
+  const committed = Number(spentSummary[0]?.amount ?? 0) + Number(reservedSummary[0]?.amount ?? 0);
+  const budget = Number(project.budgetLimit);
+  if (committed + input.reservationAmount > budget) throw new Error("Model reservation exceeds the project budget");
+  const [reservationResult] = await db.insert(modelCostReservations).values({ projectId: input.projectId, taskId: input.taskId ?? null, role: input.role, model: input.model, reservedAmount: String(input.reservationAmount), expiresAt: new Date(now.getTime() + 10 * 60 * 1000) });
+  const reservationId = Number(reservationResult.insertId);
+  const [agent] = await db.select({ id: agents.id }).from(agents).where(and(eq(agents.projectId, input.projectId), eq(agents.key, input.role))).limit(1);
+  const [runResult] = await db.insert(agentModelRuns).values({ projectId: input.projectId, taskId: input.taskId ?? null, contextPackageId: context.contextPackage.id, agentId: agent?.id ?? null, reservationId, role: input.role, model: input.model, inputSummary: input.inputSummary, status: "reserved" });
+  const runId = Number(runResult.insertId);
+  await recordExecutionEvent(userId, input.projectId, { taskId: input.taskId, actor: `Model Gateway · ${input.role}`, type: "MODEL_COST_RESERVED", label: "تم حجز تكلفة نموذج", detail: `${input.model}: $${input.reservationAmount.toFixed(4)} قبل الإرسال.` });
+  return { reservation: (await db.select().from(modelCostReservations).where(eq(modelCostReservations.id, reservationId)).limit(1))[0], run: (await db.select().from(agentModelRuns).where(eq(agentModelRuns.id, runId)).limit(1))[0], context };
+}
+
+export async function markAgentModelRunRunning(userId: number, input: { projectId: number; runId: number }) {
+  const { db } = await requireOwnedProject(userId, input.projectId);
+  const [run] = await db.select().from(agentModelRuns).where(and(eq(agentModelRuns.id, input.runId), eq(agentModelRuns.projectId, input.projectId))).limit(1);
+  if (!run || run.status !== "reserved") throw new Error("Model run is not available to start");
+  await db.update(agentModelRuns).set({ status: "running", startedAt: new Date() }).where(eq(agentModelRuns.id, run.id));
+  return (await db.select().from(agentModelRuns).where(eq(agentModelRuns.id, run.id)).limit(1))[0];
+}
+
+export async function settleAgentModelRunForProject(userId: number, input: { projectId: number; runId: number; outputJson: string; outputSummary: string; inputTokens: number; outputTokens: number; durationMs: number }) {
+  const { db } = await requireOwnedProject(userId, input.projectId);
+  const [run] = await db.select().from(agentModelRuns).where(and(eq(agentModelRuns.id, input.runId), eq(agentModelRuns.projectId, input.projectId))).limit(1);
+  if (!run || !["reserved", "running"].includes(run.status)) throw new Error("Model run cannot be settled");
+  const [reservation] = await db.select().from(modelCostReservations).where(eq(modelCostReservations.id, run.reservationId)).limit(1);
+  if (!reservation || reservation.status !== "reserved") throw new Error("Model reservation is not active");
+  const amount = Number(reservation.reservedAmount);
+  await db.update(agentModelRuns).set({ status: "completed", outputJson: input.outputJson, outputSummary: input.outputSummary, completedAt: new Date() }).where(eq(agentModelRuns.id, run.id));
+  await db.update(modelCostReservations).set({ status: "settled", settledAt: new Date() }).where(eq(modelCostReservations.id, reservation.id));
+  await db.insert(costEntries).values({ projectId: input.projectId, taskId: run.taskId, agentId: run.agentId, model: run.model, inputTokens: input.inputTokens, outputTokens: input.outputTokens, durationMs: input.durationMs, amount: String(amount) });
+  await db.insert(modelUsage).values({ projectId: input.projectId, taskId: run.taskId, model: run.model, inputTokens: input.inputTokens, outputTokens: input.outputTokens, durationMs: input.durationMs, amount: String(amount) });
+  await recordExecutionEvent(userId, input.projectId, { taskId: run.taskId ?? undefined, actor: `Model Gateway · ${run.role}`, type: "MODEL_RUN_COMPLETED", label: "اكتمل تشغيل نموذج", detail: `${run.model}: سُوّي الحجز $${amount.toFixed(4)}.` });
+  return (await db.select().from(agentModelRuns).where(eq(agentModelRuns.id, run.id)).limit(1))[0];
+}
+
+export async function failAgentModelRunForProject(userId: number, input: { projectId: number; runId: number; errorSummary: string }) {
+  const { db } = await requireOwnedProject(userId, input.projectId);
+  const [run] = await db.select().from(agentModelRuns).where(and(eq(agentModelRuns.id, input.runId), eq(agentModelRuns.projectId, input.projectId))).limit(1);
+  if (!run || !["reserved", "running"].includes(run.status)) throw new Error("Model run cannot be released");
+  await db.update(agentModelRuns).set({ status: "failed", errorSummary: input.errorSummary.slice(0, 2000), completedAt: new Date() }).where(eq(agentModelRuns.id, run.id));
+  await db.update(modelCostReservations).set({ status: "released" }).where(and(eq(modelCostReservations.id, run.reservationId), eq(modelCostReservations.status, "reserved")));
+  await recordExecutionEvent(userId, input.projectId, { taskId: run.taskId ?? undefined, actor: `Model Gateway · ${run.role}`, type: "MODEL_RUN_FAILED", label: "فشل تشغيل نموذج", detail: "حُرر الحجز قبل تسويته؛ راجع السجل المختصر." });
+  return (await db.select().from(agentModelRuns).where(eq(agentModelRuns.id, run.id)).limit(1))[0];
 }
 
 export async function listProjectCommands(userId: number, projectId: number, limit = 50) {
@@ -1047,6 +1566,7 @@ export async function createApprovalRequest(userId: number, input: { projectId: 
     label: input.level === "auto" ? "تم تنفيذ إجراء تلقائي" : "طلب موافقة",
     detail: input.title,
   });
+  broadcastRuntimeUpdate(userId, "approval");
   return (await db.select().from(approvals).where(eq(approvals.id, approvalId)).limit(1))[0];
 }
 
@@ -1081,6 +1601,7 @@ export async function resolveApproval(userId: number, input: { projectId: number
   }
   const [engineStep] = await db.select().from(taskEngineSteps).where(eq(taskEngineSteps.approvalId, input.approvalId)).limit(1);
   const engineTransition = engineStep ? await advanceTaskEngineRunForProject(userId, { projectId: input.projectId, runId: engineStep.runId }) : null;
+  broadcastRuntimeUpdate(userId, runtimeTransition ? "request" : "approval");
   return { approval: (await db.select().from(approvals).where(eq(approvals.id, input.approvalId)).limit(1))[0], engineTransition, sensitiveChangeTransition, runtimeTransition };
 }
 

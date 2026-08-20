@@ -13,6 +13,7 @@ jobs:
     name: Apply issue labels
     runs-on: ubuntu-latest
     timeout-minutes: 5
+
     steps:
       - name: Add type, area, and priority labels
         env:

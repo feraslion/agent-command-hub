@@ -10,6 +10,7 @@ import { Platform } from "react-native";
 import "@/lib/_core/nativewind-pressable";
 import { ThemeProvider } from "@/lib/theme-provider";
 import { HubProvider } from "@/lib/agent-hub";
+import { ConnectivityProvider, OfflineReadBanner } from "@/lib/connectivity";
 import { NotificationBridge } from "@/components/notification-bridge";
 import {
   SafeAreaFrameContext,
@@ -90,7 +91,9 @@ export default function RootLayout() {
     <GestureHandlerRootView style={{ flex: 1 }}>
       <trpc.Provider client={trpcClient} queryClient={queryClient}>
         <QueryClientProvider client={queryClient}>
+          <ConnectivityProvider queryClient={queryClient}>
           <HubProvider>
+            <OfflineReadBanner />
             <NotificationBridge />
             {/* Default to hiding native headers so raw route segments don't appear (e.g. "(tabs)", "products/[id]"). */}
             {/* If a screen needs the native header, explicitly enable it and set a human title via Stack.Screen options. */}
@@ -98,11 +101,13 @@ export default function RootLayout() {
               <Stack screenOptions={{ headerShown: false }}>
               <Stack.Screen name="(tabs)" />
               <Stack.Screen name="alerts" />
+              <Stack.Screen name="approval/[approvalId]" />
               <Stack.Screen name="settings" />
               <Stack.Screen name="oauth/callback" />
             </Stack>
             <StatusBar style="auto" />
           </HubProvider>
+          </ConnectivityProvider>
         </QueryClientProvider>
       </trpc.Provider>
     </GestureHandlerRootView>

@@ -9,6 +9,7 @@ import { appRouter } from "../routers";
 import { createContext } from "./context";
 import { startDryWorker } from "../dry-worker";
 import { registerLocalRunnerRoutes } from "../local-runner-routes";
+import { registerRuntimeRealtime } from "../runtime-realtime";
 
 function isPortAvailable(port: number): Promise<boolean> {
   return new Promise((resolve) => {
@@ -32,6 +33,7 @@ async function findAvailablePort(startPort: number = 3000): Promise<number> {
 async function startServer() {
   const app = express();
   const server = createServer(app);
+  registerRuntimeRealtime(server);
 
   // Enable CORS for all routes - reflect the request origin to support credentials
   app.use((req, res, next) => {

@@ -12,6 +12,7 @@ import {
   executionCommands,
   executionEvents,
   executionPlans,
+  isolatedRuntimeBundles,
   isolatedRuntimeRequests,
   localRunners,
   modelCostReservations,
@@ -19,6 +20,8 @@ import {
   projectBriefs,
   projectReports,
   projects,
+  projectRepositoryLinks,
+  repositoryScans,
   sandboxChecks,
   sensitiveWorkspaceChanges,
   taskAcceptanceCriteria,
@@ -43,9 +46,11 @@ import { sandboxGateDetail, sandboxGateKinds, sandboxGateTitle } from "./sandbox
 import { assessSensitiveWorkspaceChange } from "../lib/sensitive-workspace-policy";
 import { assertWorkspaceContent, normalizeWorkspacePath, WorkspacePathError } from "./workspace-policy";
 import { assertLocalRunnerExecutable, truncateRunnerOutput } from "./local-runner-policy";
+import { assertMultiFileBundle } from "./multi-file-runner-policy";
 import { broadcastRuntimeUpdate } from "./runtime-realtime";
 import { buildProjectReportDraft, estimateContextTokens, getCriticalPathTaskIds, normalizeContextSourceRefs, type ContextSourceRef, wouldCreateDependencyCycle } from "../lib/project-governance";
 import { modelRolePolicies, type AgentModelRole } from "../lib/agent-model-policy";
+import { validatePullRequestDraft, type PullRequestDraft } from "../lib/git-pr-policy";
 
 let _db: ReturnType<typeof drizzle> | null = null;
 
@@ -450,6 +455,83 @@ export async function heartbeatLocalRunner(input: { runnerKey: string; token: st
   return (await db.select().from(localRunners).where(eq(localRunners.id, runner.id)).limit(1))[0];
 }
 
+export type RepositoryScanSummary = {
+  displayName: string;
+  fileCount: number;
+  directoryCount: number;
+  languages: Record<string, number>;
+  manifests: string[];
+  testSignals: string[];
+  sensitiveSignals: string[];
+};
+
+export async function reportRepositoryScanFromRunner(input: { runnerKey: string; token: string; projectId: number; summary: RepositoryScanSummary }) {
+  const runner = await authenticateLocalRunner(input);
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+  const [project] = await db.select().from(projects).where(and(eq(projects.id, input.projectId), eq(projects.ownerId, runner.ownerId))).limit(1);
+  if (!project) throw new Error("Project not found or access denied");
+
+  const now = new Date();
+  await db.insert(projectRepositoryLinks).values({
+    projectId: project.id,
+    runnerId: runner.id,
+    repositoryName: input.summary.displayName,
+    status: "scanned",
+    lastScannedAt: now,
+  }).onDuplicateKeyUpdate({
+    set: {
+      runnerId: runner.id,
+      repositoryName: input.summary.displayName,
+      status: "scanned",
+      lastScannedAt: now,
+    },
+  });
+
+  const [result] = await db.insert(repositoryScans).values({
+    projectId: project.id,
+    runnerId: runner.id,
+    displayName: input.summary.displayName,
+    fileCount: input.summary.fileCount,
+    directoryCount: input.summary.directoryCount,
+    languageSummary: JSON.stringify(input.summary.languages),
+    manifestSummary: JSON.stringify(input.summary.manifests),
+    testSummary: JSON.stringify(input.summary.testSignals),
+    sensitiveSummary: JSON.stringify(input.summary.sensitiveSignals),
+  });
+  broadcastRuntimeUpdate(runner.ownerId, "runner");
+  return (await db.select().from(repositoryScans).where(eq(repositoryScans.id, Number(result.insertId))).limit(1))[0];
+}
+
+export async function listRepositoryScansForOwner(userId: number, projectId?: number) {
+  const db = await getDb();
+  if (!db) return [];
+  const rows = await db.select({
+    scan: repositoryScans,
+    project: { id: projects.id, name: projects.name, code: projects.code },
+    runner: { id: localRunners.id, label: localRunners.label, runnerKey: localRunners.runnerKey },
+  }).from(repositoryScans)
+    .innerJoin(projects, eq(repositoryScans.projectId, projects.id))
+    .innerJoin(localRunners, eq(repositoryScans.runnerId, localRunners.id))
+    .where(projectId ? and(eq(projects.ownerId, userId), eq(projects.id, projectId)) : eq(projects.ownerId, userId))
+    .orderBy(desc(repositoryScans.createdAt))
+    .limit(30);
+  return rows;
+}
+
+export async function requestPullRequestForOwner(userId: number, draft: PullRequestDraft) {
+  const normalized = validatePullRequestDraft(draft);
+  const detail = `طلب مراجعة Pull Request فقط: ${normalized.headBranch} ← ${normalized.baseBranch}.${normalized.summary ? ` ${normalized.summary}` : ""} لن تنفذ المنصة دفعاً أو دمجاً أو حذفاً؛ بعد الاعتماد يلزم Runner محلي وخطوة منفصلة مصرح بها.`;
+  return createApprovalRequest(userId, {
+    projectId: normalized.projectId,
+    requestedBy: "Git PR Gate",
+    title: normalized.title,
+    detail,
+    impact: "مراجعة تغيير عبر Pull Request فقط؛ لا يوجد دمج أو دفع تلقائي.",
+    level: "approval",
+  });
+}
+
 export async function claimLocalRuntimeRequest(input: { runnerKey: string; token: string }) {
   const runner = await heartbeatLocalRunner(input);
   const db = await getDb();
@@ -464,17 +546,24 @@ export async function claimLocalRuntimeRequest(input: { runnerKey: string; token
     eq(isolatedRuntimeRequests.status, "queued"),
   ));
   if (Number(claim.affectedRows ?? 0) !== 1) return null;
-  const [file] = await db.select({ content: workspaceFiles.content }).from(workspaceFiles).where(and(
-    eq(workspaceFiles.workspaceId, candidate.workspaceId),
-    eq(workspaceFiles.path, candidate.targetPath),
-  )).limit(1);
-  if (!file) {
-    await db.update(isolatedRuntimeRequests).set({ status: "failed", reason: "تعذر العثور على ملف Workspace عند الحجز.", completedAt: new Date() }).where(eq(isolatedRuntimeRequests.id, candidate.id));
-    throw new Error("Workspace file no longer exists");
-  }
-  let executable: ReturnType<typeof assertLocalRunnerExecutable>;
+  let outbound: { requestId: number; targetPath: string; profile: "node_script" | "typescript_lockfile" | "typescript_multi_file"; content?: string; files?: { path: string; content: string }[] };
   try {
-    executable = assertLocalRunnerExecutable(candidate.targetPath, file.content);
+    if (candidate.profile === "typescript_multi_file") {
+      const [bundleRecord] = await db.select().from(isolatedRuntimeBundles).where(eq(isolatedRuntimeBundles.requestId, candidate.id)).limit(1);
+      if (!bundleRecord) throw new Error("تعذر العثور على حزمة الملفات المتعددة عند الحجز.");
+      const parsedFiles: unknown = JSON.parse(bundleRecord.filesJson);
+      if (!Array.isArray(parsedFiles)) throw new Error("صيغة حزمة الملفات المتعددة غير صالحة.");
+      const bundle = assertMultiFileBundle(bundleRecord.entryPath, parsedFiles as { path: string; content: string }[]);
+      outbound = { requestId: candidate.id, targetPath: bundle.entryPath, profile: "typescript_multi_file", files: bundle.files };
+    } else {
+      const [file] = await db.select({ content: workspaceFiles.content }).from(workspaceFiles).where(and(
+        eq(workspaceFiles.workspaceId, candidate.workspaceId),
+        eq(workspaceFiles.path, candidate.targetPath),
+      )).limit(1);
+      if (!file) throw new Error("تعذر العثور على ملف Workspace عند الحجز.");
+      const executable = assertLocalRunnerExecutable(candidate.targetPath, file.content);
+      outbound = { requestId: candidate.id, targetPath: executable.normalizedPath, profile: executable.profile, content: file.content };
+    }
   } catch (error) {
     const detail = error instanceof Error ? error.message : "رفضت سياسة Runner محتوى الملف بعد الحجز.";
     await db.update(isolatedRuntimeRequests).set({ status: "failed", reason: detail, completedAt: new Date() }).where(eq(isolatedRuntimeRequests.id, candidate.id));
@@ -486,7 +575,7 @@ export async function claimLocalRuntimeRequest(input: { runnerKey: string; token
   broadcastRuntimeUpdate(runner.ownerId, "request");
   await recordWorkspaceAudit(candidate.workspaceId, { actor: runner.runnerKey, action: "sandbox_checked", path: candidate.targetPath, detail: "حجز Runner محلي طلباً معتمداً للتنفيذ داخل حاوية مقيدة." });
   await recordExecutionEvent(runner.ownerId, candidate.projectId, { actor: runner.runnerKey, type: "ISOLATED_RUNTIME_CLAIMED", label: "حجز Runner محلي طلب تنفيذ", detail: candidate.targetPath });
-  return { requestId: candidate.id, targetPath: executable.normalizedPath, profile: executable.profile, content: file.content };
+  return outbound;
 }
 
 export async function reportLocalRuntimeRequest(input: { runnerKey: string; token: string; requestId: number; status: "completed" | "failed"; exitCode: number; stdout?: string; stderr?: string; durationMs: number }) {
@@ -617,6 +706,53 @@ export async function requestIsolatedRuntimeExecution(userId: number, input: { p
   });
   await recordWorkspaceAudit(workspace.id, { actor: "Isolated Runtime Gate", action: "gate_requested", path, detail: "أُنشئ طلب موافقة لتنفيذ محدود عبر Runner محلي؛ لم تُشغّل شيفرة بعد." });
   await recordExecutionEvent(userId, input.projectId, { actor: "Isolated Runtime Gate", type: "ISOLATED_RUNTIME_APPROVAL_REQUESTED", label: "طلب موافقة لتنفيذ معزول", detail: path });
+  broadcastRuntimeUpdate(userId, "approval");
+  return (await db.select().from(isolatedRuntimeRequests).where(eq(isolatedRuntimeRequests.id, Number(result.insertId))).limit(1))[0];
+}
+
+export async function requestMultiFileRuntimeExecution(userId: number, input: { projectId: number; entryPath: string; paths: string[]; engineRunId?: number }) {
+  const ensured = await ensureWorkspaceForProject(userId, input.projectId);
+  const workspace = ensured.workspace;
+  const requestedPaths = [...new Set(input.paths.map(normalizeWorkspacePath))];
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+  const workspaceBundle = await db.select({ path: workspaceFiles.path, content: workspaceFiles.content }).from(workspaceFiles).where(and(
+    eq(workspaceFiles.workspaceId, workspace.id),
+    inArray(workspaceFiles.path, requestedPaths),
+  ));
+  if (workspaceBundle.length !== requestedPaths.length) throw new Error("يجب أن تكون جميع ملفات الحزمة موجودة في Workspace.");
+  const bundle = assertMultiFileBundle(normalizeWorkspacePath(input.entryPath), workspaceBundle);
+  const runners = await db.select().from(localRunners).where(eq(localRunners.ownerId, userId)).orderBy(desc(localRunners.updatedAt));
+  const runner = runners.find((candidate) => candidate.status === "ready" && isRunnerFresh(candidate.lastHeartbeatAt) && supportsRunnerProfile(candidate, "typescript_multi_file"));
+  const requestValues = {
+    projectId: input.projectId,
+    workspaceId: workspace.id,
+    engineRunId: input.engineRunId ?? null,
+    requestedByUserId: userId,
+    targetPath: bundle.entryPath,
+    profile: "typescript_multi_file",
+  } as const;
+  if (!runner) {
+    const detail = "لا يوجد Runner محلي متصل يعلن دعم حزمة TypeScript متعددة الملفات. شغّل العميل المحدث على جهاز يملك Docker؛ لن ينفذ التطبيق أي شيفرة قبل ذلك.";
+    const [result] = await db.insert(isolatedRuntimeRequests).values({ ...requestValues, status: "environment_required", reason: detail });
+    await db.insert(isolatedRuntimeBundles).values({ requestId: Number(result.insertId), entryPath: bundle.entryPath, filesJson: JSON.stringify(bundle.files), totalBytes: bundle.totalBytes });
+    await recordWorkspaceAudit(workspace.id, { actor: "Multi-file Runtime Gate", action: "tool_rejected", path: bundle.entryPath, detail });
+    await recordExecutionEvent(userId, input.projectId, { actor: "Multi-file Runtime Gate", type: "ISOLATED_RUNTIME_RUNNER_REQUIRED", label: "حُجب تنفيذ متعدد الملفات بانتظار Runner متوافق", detail: bundle.entryPath });
+    broadcastRuntimeUpdate(userId, "request");
+    return (await db.select().from(isolatedRuntimeRequests).where(eq(isolatedRuntimeRequests.id, Number(result.insertId))).limit(1))[0];
+  }
+  const approval = await createApprovalRequest(userId, {
+    projectId: input.projectId,
+    requestedBy: "Multi-file Runtime Gate",
+    title: `تنفيذ TypeScript متعدد الملفات (${bundle.files.length})`,
+    detail: `سيشغّل Runner المحلي ${runner.label} حزمة تضم ${bundle.files.length} ملفاً من Workspace داخل حاوية بلا شبكة وبحد أقصى 20 ثانية و384MB. لا يُسمح إلا بالاستيراد النسبي، ولا توجد حزم خارجية أو وصول إلى النظام.`,
+    impact: "تنفيذ شيفرة متعددة الملفات داخل Docker محلي مقيد بعد اعتماد صريح.",
+    level: "approval",
+  });
+  const [result] = await db.insert(isolatedRuntimeRequests).values({ ...requestValues, approvalId: approval.id, runnerId: runner.id, status: "awaiting_approval", reason: "ينتظر موافقة صريحة قبل إتاحة الحزمة متعددة الملفات إلى Runner المحلي." });
+  await db.insert(isolatedRuntimeBundles).values({ requestId: Number(result.insertId), entryPath: bundle.entryPath, filesJson: JSON.stringify(bundle.files), totalBytes: bundle.totalBytes });
+  await recordWorkspaceAudit(workspace.id, { actor: "Multi-file Runtime Gate", action: "gate_requested", path: bundle.entryPath, detail: "أُنشئ طلب موافقة لتنفيذ حزمة TypeScript متعددة الملفات؛ لم تُشغّل الشيفرة بعد." });
+  await recordExecutionEvent(userId, input.projectId, { actor: "Multi-file Runtime Gate", type: "ISOLATED_RUNTIME_APPROVAL_REQUESTED", label: "طلب موافقة لتنفيذ متعدد الملفات", detail: bundle.entryPath });
   broadcastRuntimeUpdate(userId, "approval");
   return (await db.select().from(isolatedRuntimeRequests).where(eq(isolatedRuntimeRequests.id, Number(result.insertId))).limit(1))[0];
 }

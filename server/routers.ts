@@ -145,6 +145,19 @@ export const appRouter = router({
     createPairing: protectedProcedure.input(z.object({ label: z.string().trim().min(2).max(128) })).mutation(({ ctx, input }) => db.createLocalRunnerPairingForOwner(ctx.user.id, input.label)),
     revoke: protectedProcedure.input(z.object({ runnerId: z.number().int().positive() })).mutation(({ ctx, input }) => db.revokeLocalRunnerForOwner(ctx.user.id, input.runnerId)),
   }),
+  repositoryScans: router({
+    list: protectedProcedure.input(z.object({ projectId: z.number().int().positive().optional() }).optional()).query(({ ctx, input }) => db.listRepositoryScansForOwner(ctx.user.id, input?.projectId)),
+  }),
+  gitGate: router({
+    boundary: protectedProcedure.query(() => ({ allowed: ["inspect", "request_pull_request"], blocked: ["push", "merge", "force_push", "delete_branch", "change_protection"] })),
+    requestPullRequest: protectedProcedure.input(z.object({
+      projectId: z.number().int().positive(),
+      headBranch: z.string().trim().min(1).max(128),
+      baseBranch: z.string().trim().min(1).max(128),
+      title: z.string().trim().min(2).max(255),
+      summary: z.string().trim().max(4000),
+    })).mutation(({ ctx, input }) => db.requestPullRequestForOwner(ctx.user.id, input)),
+  }),
   operationalHealth: router({
     get: protectedProcedure.query(({ ctx }) => db.getOwnerOperationalHealth(ctx.user.id)),
   }),
@@ -207,6 +220,7 @@ export const appRouter = router({
     listForOwner: protectedProcedure.query(({ ctx }) => db.listOwnerIsolatedRuntimeRequests(ctx.user.id)),
     listRequests: protectedProcedure.input(projectIdInput.extend({ limit: z.number().int().min(1).max(100).optional() })).query(({ ctx, input }) => db.listIsolatedRuntimeRequestsForProject(ctx.user.id, input.projectId, input.limit ?? 50)),
     requestExecution: protectedProcedure.input(projectIdInput.extend({ targetPath: z.string().trim().min(1).max(512), engineRunId: z.number().int().positive().optional() })).mutation(({ ctx, input }) => db.requestIsolatedRuntimeExecution(ctx.user.id, input)),
+    requestMultiFileExecution: protectedProcedure.input(projectIdInput.extend({ entryPath: z.string().trim().min(1).max(512), paths: z.array(z.string().trim().min(1).max(512)).min(2).max(24), engineRunId: z.number().int().positive().optional() })).mutation(({ ctx, input }) => db.requestMultiFileRuntimeExecution(ctx.user.id, input)),
   }),
   events: router({
     list: protectedProcedure.input(projectIdInput.extend({ limit: z.number().int().min(1).max(200).optional() })).query(({ ctx, input }) => db.listProjectEvents(ctx.user.id, input.projectId, input.limit ?? 50)),

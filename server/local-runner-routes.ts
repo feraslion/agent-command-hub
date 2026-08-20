@@ -20,6 +20,17 @@ const reportSchema = z.object({
   durationMs: z.number().int().min(0).max(60_000),
 });
 
+const repositoryScanSchema = z.object({
+  projectId: z.number().int().positive(),
+  displayName: z.string().trim().min(1).max(255).regex(/^[^\\/]+$/u),
+  fileCount: z.number().int().min(0).max(100_000),
+  directoryCount: z.number().int().min(0).max(20_000),
+  languages: z.record(z.string().min(1).max(32), z.number().int().min(0).max(100_000)).refine((value) => Object.keys(value).length <= 40),
+  manifests: z.array(z.string().min(1).max(128)).max(30),
+  testSignals: z.array(z.string().min(1).max(128)).max(50),
+  sensitiveSignals: z.array(z.string().min(1).max(128)).max(50),
+});
+
 function getRunnerCredentials(req: Request) {
   const authorization = req.header("authorization") ?? "";
   const token = authorization.startsWith("Bearer ") ? authorization.slice(7).trim() : "";
@@ -65,6 +76,30 @@ export function registerLocalRunnerRoutes(app: Express) {
       return res.json({ request: { id: request.id, status: request.status, completedAt: request.completedAt } });
     } catch (error) {
       return res.status(400).json({ error: error instanceof Error ? error.message : "Unable to record runtime result." });
+    }
+  });
+
+  app.post("/api/local-runner/repository-scan", async (req, res) => {
+    const credentials = getRunnerCredentials(req);
+    const body = repositoryScanSchema.safeParse(req.body);
+    if (!credentials || !body.success) return sendAuthError(res);
+    try {
+      const scan = await db.reportRepositoryScanFromRunner({
+        ...credentials,
+        projectId: body.data.projectId,
+        summary: {
+          displayName: body.data.displayName,
+          fileCount: body.data.fileCount,
+          directoryCount: body.data.directoryCount,
+          languages: body.data.languages,
+          manifests: body.data.manifests,
+          testSignals: body.data.testSignals,
+          sensitiveSignals: body.data.sensitiveSignals,
+        },
+      });
+      return res.json({ scan: { id: scan.id, projectId: scan.projectId, createdAt: scan.createdAt } });
+    } catch (error) {
+      return res.status(400).json({ error: error instanceof Error ? error.message : "Unable to record repository scan." });
     }
   });
 }

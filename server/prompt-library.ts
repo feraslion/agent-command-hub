@@ -1,4 +1,4 @@
-import { masterAgentPromptAr } from "./master-agent-prompt";
+import { masterAgentPromptAr, masterAgentPromptEn } from "./master-agent-prompt";
 
 export const promptTemplateKeyValues = ["planner", "coder", "qa", "debugger"] as const;
 export const promptTemplateLocaleValues = ["ar", "en"] as const;
@@ -121,7 +121,8 @@ export function composeAgentSystemPrompt(input: { templateKey: PromptTemplateKey
   const heading = input.templateLocale === "ar" ? "## تعليمات مخصصة محفوظة" : "## Saved custom instructions";
   const emptyMessage = input.templateLocale === "ar" ? "لا توجد تعليمات مخصصة إضافية." : "No additional custom instructions.";
   const templateHeading = input.templateLocale === "ar" ? "## القالب المتخصص المعيّن" : "## Assigned specialist template";
-  return `${masterAgentPromptAr}\n\n---\n\n${templateHeading}\n${template.prompts[input.templateLocale]}\n\n${heading}\n${customInstructions || emptyMessage}`;
+  const masterPrompt = input.templateLocale === "ar" ? masterAgentPromptAr : masterAgentPromptEn;
+  return `${masterPrompt}\n\n---\n\n${templateHeading}\n${template.prompts[input.templateLocale]}\n\n${heading}\n${customInstructions || emptyMessage}`;
 }
 
 export function defaultTemplateForAgent(agentKey: string): PromptTemplateKey {

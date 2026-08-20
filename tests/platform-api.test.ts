@@ -175,7 +175,7 @@ describe("platform API security", () => {
 
     const preview = await caller.agentPrompts.preview({ templateKey: "debugger", templateLocale: "en", customInstructions: "Prioritize the smallest safe isolation step." });
 
-    expect(preview.finalPrompt).toContain("Agent Command Hub Master Agent");
+    expect(preview.finalPrompt).toContain("You are the Agent Command Hub Master Agent");
     expect(preview.finalPrompt).toContain("You are the Debugger in Agent Command Hub.");
     expect(preview.finalPrompt).toContain("Prioritize the smallest safe isolation step.");
     expect(preview.finalPrompt).toContain("Saved custom instructions");

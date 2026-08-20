@@ -5,15 +5,21 @@ import {
   agentPromptAssignments,
   agents,
   approvals,
+  artifacts,
+  contextPackages,
   costEntries,
   executionCommands,
   executionEvents,
   executionPlans,
   isolatedRuntimeRequests,
   localRunners,
+  projectBriefs,
+  projectReports,
   projects,
   sandboxChecks,
   sensitiveWorkspaceChanges,
+  taskAcceptanceCriteria,
+  taskDependencies,
   type promptTemplateKeyValues,
   type promptTemplateLocaleValues,
   taskStatusValues,
@@ -24,6 +30,7 @@ import {
   type User,
   users,
   workerSettings,
+  workPlans,
   workspaceAuditLogs,
   workspaceFiles,
   workspaces,
@@ -34,6 +41,7 @@ import { assessSensitiveWorkspaceChange } from "../lib/sensitive-workspace-polic
 import { assertWorkspaceContent, normalizeWorkspacePath, WorkspacePathError } from "./workspace-policy";
 import { assertLocalRunnerExecutable, truncateRunnerOutput } from "./local-runner-policy";
 import { broadcastRuntimeUpdate } from "./runtime-realtime";
+import { buildProjectReportDraft, estimateContextTokens, getCriticalPathTaskIds, normalizeContextSourceRefs, type ContextSourceRef, wouldCreateDependencyCycle } from "../lib/project-governance";
 
 let _db: ReturnType<typeof drizzle> | null = null;
 
@@ -877,10 +885,15 @@ export async function listProjectTasks(userId: number, projectId: number) {
   return db.select().from(tasks).where(eq(tasks.projectId, projectId)).orderBy(desc(tasks.updatedAt));
 }
 
-export async function createTaskForProject(userId: number, input: { projectId: number; title: string; description?: string; stage?: string; priority?: "low" | "medium" | "high" | "critical"; assignedAgentId?: number }) {
+export async function createTaskForProject(userId: number, input: { projectId: number; workPlanId?: number; title: string; description?: string; stage?: string; priority?: "low" | "medium" | "high" | "critical"; assignedAgentId?: number }) {
   const { db } = await requireOwnedProject(userId, input.projectId);
+  if (input.workPlanId) {
+    const [plan] = await db.select({ id: workPlans.id }).from(workPlans).where(and(eq(workPlans.id, input.workPlanId), eq(workPlans.projectId, input.projectId))).limit(1);
+    if (!plan) throw new Error("Work plan not found for this project");
+  }
   const [result] = await db.insert(tasks).values({
     projectId: input.projectId,
+    workPlanId: input.workPlanId ?? null,
     assignedAgentId: input.assignedAgentId ?? null,
     title: input.title,
     description: input.description ?? null,
@@ -960,6 +973,205 @@ export async function createProjectAgent(userId: number, input: { projectId: num
 export async function listProjectEvents(userId: number, projectId: number, limit = 50) {
   const { db } = await requireOwnedProject(userId, projectId);
   return db.select().from(executionEvents).where(eq(executionEvents.projectId, projectId)).orderBy(desc(executionEvents.createdAt)).limit(limit);
+}
+
+export async function getProjectBriefForOwner(userId: number, projectId: number) {
+  const { db } = await requireOwnedProject(userId, projectId);
+  const [brief] = await db.select().from(projectBriefs).where(eq(projectBriefs.projectId, projectId)).limit(1);
+  return brief ?? null;
+}
+
+export async function saveProjectBriefForOwner(userId: number, input: { projectId: number; goal: string; scope: string; constraints: string; assumptions: string; openQuestions: string; risks: string }) {
+  const { db } = await requireOwnedProject(userId, input.projectId);
+  await db.insert(projectBriefs).values({
+    projectId: input.projectId,
+    goal: input.goal,
+    scope: input.scope,
+    constraints: input.constraints,
+    assumptions: input.assumptions,
+    openQuestions: input.openQuestions,
+    risks: input.risks,
+  }).onDuplicateKeyUpdate({ set: { goal: input.goal, scope: input.scope, constraints: input.constraints, assumptions: input.assumptions, openQuestions: input.openQuestions, risks: input.risks } });
+  const brief = await getProjectBriefForOwner(userId, input.projectId);
+  await recordExecutionEvent(userId, input.projectId, { actor: "مالك المشروع", type: "PROJECT_BRIEF_SAVED", label: "تم حفظ موجز المشروع", detail: "تم تحديث الهدف والنطاق والقيود." });
+  return brief;
+}
+
+export async function listWorkPlansForProject(userId: number, projectId: number) {
+  const { db } = await requireOwnedProject(userId, projectId);
+  return db.select().from(workPlans).where(eq(workPlans.projectId, projectId)).orderBy(desc(workPlans.updatedAt));
+}
+
+export async function createWorkPlanForProject(userId: number, input: { projectId: number; title: string; summary: string; status?: "draft" | "review" | "approved" }) {
+  const { db } = await requireOwnedProject(userId, input.projectId);
+  const [result] = await db.insert(workPlans).values({ projectId: input.projectId, title: input.title, summary: input.summary, status: input.status ?? "draft" });
+  const [plan] = await db.select().from(workPlans).where(eq(workPlans.id, Number(result.insertId))).limit(1);
+  await recordExecutionEvent(userId, input.projectId, { actor: "مالك المشروع", type: "WORK_PLAN_CREATED", label: "تم إنشاء خطة عمل", detail: plan.title });
+  return plan;
+}
+
+export async function setWorkPlanStatusForProject(userId: number, input: { projectId: number; workPlanId: number; status: "draft" | "review" | "approved" | "superseded" }) {
+  const { db } = await requireOwnedProject(userId, input.projectId);
+  const [plan] = await db.select().from(workPlans).where(and(eq(workPlans.id, input.workPlanId), eq(workPlans.projectId, input.projectId))).limit(1);
+  if (!plan) throw new Error("Work plan not found");
+  await db.update(workPlans).set({ status: input.status }).where(eq(workPlans.id, plan.id));
+  const [updated] = await db.select().from(workPlans).where(eq(workPlans.id, plan.id)).limit(1);
+  await recordExecutionEvent(userId, input.projectId, { actor: "مالك المشروع", type: "WORK_PLAN_STATUS_CHANGED", label: "تغيرت حالة خطة العمل", detail: `${plan.title} → ${input.status}` });
+  return updated;
+}
+
+export async function listTaskAcceptanceCriteriaForProject(userId: number, projectId: number) {
+  const { db } = await requireOwnedProject(userId, projectId);
+  const projectTasks = await db.select({ id: tasks.id, title: tasks.title }).from(tasks).where(eq(tasks.projectId, projectId));
+  if (!projectTasks.length) return [];
+  const rows = await db.select().from(taskAcceptanceCriteria).where(inArray(taskAcceptanceCriteria.taskId, projectTasks.map((task) => task.id)));
+  const titles = new Map(projectTasks.map((task) => [task.id, task.title]));
+  return rows.map((row) => ({ ...row, taskTitle: titles.get(row.taskId) ?? "مهمة غير معروفة" }));
+}
+
+export async function createTaskAcceptanceCriterionForProject(userId: number, input: { projectId: number; taskId: number; criterion: string }) {
+  const { db } = await requireOwnedProject(userId, input.projectId);
+  const [task] = await db.select().from(tasks).where(and(eq(tasks.id, input.taskId), eq(tasks.projectId, input.projectId))).limit(1);
+  if (!task) throw new Error("Task not found");
+  const [result] = await db.insert(taskAcceptanceCriteria).values({ taskId: task.id, criterion: input.criterion });
+  const [criterion] = await db.select().from(taskAcceptanceCriteria).where(eq(taskAcceptanceCriteria.id, Number(result.insertId))).limit(1);
+  await recordExecutionEvent(userId, input.projectId, { taskId: task.id, actor: "مالك المشروع", type: "DONE_CRITERION_CREATED", label: "تمت إضافة معيار إتمام", detail: `${task.title}: ${input.criterion}` });
+  return criterion;
+}
+
+export async function verifyTaskAcceptanceCriterionForProject(userId: number, input: { projectId: number; criterionId: number; status: "verified" | "waived"; evidenceNote?: string }) {
+  const { db } = await requireOwnedProject(userId, input.projectId);
+  const [criterion] = await db.select().from(taskAcceptanceCriteria).where(eq(taskAcceptanceCriteria.id, input.criterionId)).limit(1);
+  if (!criterion) throw new Error("Acceptance criterion not found");
+  const [task] = await db.select().from(tasks).where(and(eq(tasks.id, criterion.taskId), eq(tasks.projectId, input.projectId))).limit(1);
+  if (!task) throw new Error("Acceptance criterion is outside this project");
+  await db.update(taskAcceptanceCriteria).set({ status: input.status, evidenceNote: input.evidenceNote ?? null, verifiedAt: new Date() }).where(eq(taskAcceptanceCriteria.id, criterion.id));
+  const [updated] = await db.select().from(taskAcceptanceCriteria).where(eq(taskAcceptanceCriteria.id, criterion.id)).limit(1);
+  await recordExecutionEvent(userId, input.projectId, { taskId: task.id, actor: "مالك المشروع", type: "DONE_CRITERION_RESOLVED", label: input.status === "verified" ? "تم التحقق من معيار إتمام" : "تم تجاوز معيار إتمام", detail: `${task.title}: ${criterion.criterion}` });
+  return updated;
+}
+
+export async function listTaskDependenciesForProject(userId: number, projectId: number) {
+  const { db } = await requireOwnedProject(userId, projectId);
+  const projectTasks = await db.select({ id: tasks.id, title: tasks.title, status: tasks.status }).from(tasks).where(eq(tasks.projectId, projectId));
+  if (!projectTasks.length) return { dependencies: [], criticalPathTaskIds: [] as number[] };
+  const taskIds = projectTasks.map((task) => task.id);
+  const rows = await db.select().from(taskDependencies).where(inArray(taskDependencies.taskId, taskIds));
+  const labels = new Map(projectTasks.map((task) => [task.id, task.title]));
+  return {
+    dependencies: rows.map((row) => ({ ...row, taskTitle: labels.get(row.taskId) ?? "مهمة", dependsOnTaskTitle: labels.get(row.dependsOnTaskId) ?? "مهمة" })),
+    criticalPathTaskIds: getCriticalPathTaskIds(projectTasks, rows),
+  };
+}
+
+export async function addTaskDependencyForProject(userId: number, input: { projectId: number; taskId: number; dependsOnTaskId: number }) {
+  const { db } = await requireOwnedProject(userId, input.projectId);
+  const projectTasks = await db.select({ id: tasks.id, title: tasks.title }).from(tasks).where(eq(tasks.projectId, input.projectId));
+  const taskIds = new Set(projectTasks.map((task) => task.id));
+  if (!taskIds.has(input.taskId) || !taskIds.has(input.dependsOnTaskId)) throw new Error("Dependency tasks must belong to this project");
+  const existing = await db.select().from(taskDependencies).where(inArray(taskDependencies.taskId, [...taskIds]));
+  if (wouldCreateDependencyCycle(input.taskId, input.dependsOnTaskId, existing)) throw new Error("Dependency would create a cycle");
+  await db.insert(taskDependencies).values({ taskId: input.taskId, dependsOnTaskId: input.dependsOnTaskId }).onDuplicateKeyUpdate({ set: { taskId: input.taskId } });
+  const labels = new Map(projectTasks.map((task) => [task.id, task.title]));
+  await recordExecutionEvent(userId, input.projectId, { taskId: input.taskId, actor: "مالك المشروع", type: "TASK_DEPENDENCY_ADDED", label: "تمت إضافة اعتماد مهمة", detail: `${labels.get(input.taskId)} يعتمد على ${labels.get(input.dependsOnTaskId)}.` });
+  return listTaskDependenciesForProject(userId, input.projectId);
+}
+
+export async function listArtifactsForProject(userId: number, projectId: number) {
+  const { db } = await requireOwnedProject(userId, projectId);
+  return db.select().from(artifacts).where(eq(artifacts.projectId, projectId)).orderBy(desc(artifacts.createdAt));
+}
+
+export async function registerArtifactForProject(userId: number, input: { projectId: number; taskId?: number; name: string; kind: string; reference: string; summary?: string }) {
+  const { db } = await requireOwnedProject(userId, input.projectId);
+  if (input.taskId) {
+    const [task] = await db.select({ id: tasks.id }).from(tasks).where(and(eq(tasks.id, input.taskId), eq(tasks.projectId, input.projectId))).limit(1);
+    if (!task) throw new Error("Task not found for artifact");
+  }
+  const [result] = await db.insert(artifacts).values({ projectId: input.projectId, taskId: input.taskId ?? null, name: input.name, kind: input.kind, storageKey: input.reference, summary: input.summary ?? null });
+  const [artifact] = await db.select().from(artifacts).where(eq(artifacts.id, Number(result.insertId))).limit(1);
+  await recordExecutionEvent(userId, input.projectId, { taskId: input.taskId, actor: "مالك المشروع", type: "ARTIFACT_REGISTERED", label: "تم تسجيل دليل", detail: `${input.kind}: ${input.name}` });
+  return artifact;
+}
+
+export async function listContextPackagesForProject(userId: number, projectId: number) {
+  const { db } = await requireOwnedProject(userId, projectId);
+  return db.select().from(contextPackages).where(eq(contextPackages.projectId, projectId)).orderBy(desc(contextPackages.createdAt));
+}
+
+export async function createContextPackageForProject(userId: number, input: { projectId: number; taskId?: number; title: string; includeBrief: boolean; workPlanId?: number; taskIds: number[]; artifactIds: number[]; includeRecentEvents?: boolean }) {
+  const { db } = await requireOwnedProject(userId, input.projectId);
+  if (input.taskId) {
+    const [task] = await db.select({ id: tasks.id }).from(tasks).where(and(eq(tasks.id, input.taskId), eq(tasks.projectId, input.projectId))).limit(1);
+    if (!task) throw new Error("Context task not found");
+  }
+  const sourceRefs: ContextSourceRef[] = [];
+  if (input.includeBrief) {
+    const brief = await getProjectBriefForOwner(userId, input.projectId);
+    if (brief) sourceRefs.push({ kind: "brief", id: brief.id, label: "موجز المشروع" });
+  }
+  if (input.workPlanId) {
+    const [plan] = await db.select().from(workPlans).where(and(eq(workPlans.id, input.workPlanId), eq(workPlans.projectId, input.projectId))).limit(1);
+    if (!plan) throw new Error("Work plan not found for context");
+    sourceRefs.push({ kind: "plan", id: plan.id, label: plan.title });
+  }
+  if (input.taskIds.length) {
+    const selectedTasks = await db.select({ id: tasks.id, title: tasks.title }).from(tasks).where(and(eq(tasks.projectId, input.projectId), inArray(tasks.id, input.taskIds)));
+    sourceRefs.push(...selectedTasks.map((task) => ({ kind: "task" as const, id: task.id, label: task.title })));
+  }
+  if (input.artifactIds.length) {
+    const selectedArtifacts = await db.select({ id: artifacts.id, name: artifacts.name }).from(artifacts).where(and(eq(artifacts.projectId, input.projectId), inArray(artifacts.id, input.artifactIds)));
+    sourceRefs.push(...selectedArtifacts.map((artifact) => ({ kind: "artifact" as const, id: artifact.id, label: artifact.name })));
+  }
+  if (input.includeRecentEvents) {
+    const events = await db.select({ id: executionEvents.id, label: executionEvents.label }).from(executionEvents).where(eq(executionEvents.projectId, input.projectId)).orderBy(desc(executionEvents.createdAt)).limit(5);
+    sourceRefs.push(...events.map((event) => ({ kind: "event" as const, id: event.id, label: event.label })));
+  }
+  const normalizedSources = normalizeContextSourceRefs(sourceRefs);
+  if (!normalizedSources.length) throw new Error("Context package requires at least one owned source");
+  const [result] = await db.insert(contextPackages).values({ projectId: input.projectId, taskId: input.taskId ?? null, title: input.title, sourceRefs: JSON.stringify(normalizedSources), redactionSummary: "تحتوي الحزمة على مراجع وملخصات مقتطعة فقط؛ لا تتضمن محتوى Workspace الخام أو أسرار البيئة.", tokenEstimate: estimateContextTokens(normalizedSources) });
+  const [contextPackage] = await db.select().from(contextPackages).where(eq(contextPackages.id, Number(result.insertId))).limit(1);
+  await recordExecutionEvent(userId, input.projectId, { taskId: input.taskId, actor: "مالك المشروع", type: "CONTEXT_PACKAGE_CREATED", label: "تم إنشاء حزمة سياق", detail: `${normalizedSources.length} مراجع منقحة.` });
+  return contextPackage;
+}
+
+export async function listProjectReportsForOwner(userId: number, projectId: number) {
+  const { db } = await requireOwnedProject(userId, projectId);
+  return db.select().from(projectReports).where(eq(projectReports.projectId, projectId)).orderBy(desc(projectReports.createdAt));
+}
+
+export async function createProjectReportForOwner(userId: number, input: { projectId: number; kind: "delivery" | "blocked"; finalize?: boolean }) {
+  const { db, project } = await requireOwnedProject(userId, input.projectId);
+  const projectTasks = await db.select({ title: tasks.title, status: tasks.status }).from(tasks).where(eq(tasks.projectId, input.projectId));
+  const projectArtifacts = await db.select({ name: artifacts.name }).from(artifacts).where(eq(artifacts.projectId, input.projectId));
+  const pendingApprovals = await db.select({ id: approvals.id }).from(approvals).where(and(eq(approvals.projectId, input.projectId), eq(approvals.status, "pending")));
+  const draft = buildProjectReportDraft({
+    projectName: project.name,
+    projectStatus: project.status,
+    completedTaskTitles: projectTasks.filter((task) => task.status === "completed").map((task) => task.title),
+    blockedTaskTitles: projectTasks.filter((task) => ["failed", "cancelled", "debugging"].includes(task.status)).map((task) => task.title),
+    artifactNames: projectArtifacts.map((artifact) => artifact.name),
+    pendingApprovals: pendingApprovals.length,
+    kind: input.kind,
+  });
+  const [result] = await db.insert(projectReports).values({ projectId: input.projectId, kind: input.kind, status: input.finalize ? "final" : "draft", ...draft, finalizedAt: input.finalize ? new Date() : null });
+  const [report] = await db.select().from(projectReports).where(eq(projectReports.id, Number(result.insertId))).limit(1);
+  await recordExecutionEvent(userId, input.projectId, { actor: "مالك المشروع", type: "PROJECT_REPORT_CREATED", label: input.kind === "delivery" ? "تم إنشاء تقرير تسليم" : "تم إنشاء تقرير إيقاف", detail: input.finalize ? "التقرير معلّم كنهائي." : "تم حفظ مسودة التقرير." });
+  return report;
+}
+
+export async function getProjectGovernanceForOwner(userId: number, projectId: number) {
+  const [brief, workPlans, criteria, dependencyGraph, artifacts, contextPackages, reports, timeline] = await Promise.all([
+    getProjectBriefForOwner(userId, projectId),
+    listWorkPlansForProject(userId, projectId),
+    listTaskAcceptanceCriteriaForProject(userId, projectId),
+    listTaskDependenciesForProject(userId, projectId),
+    listArtifactsForProject(userId, projectId),
+    listContextPackagesForProject(userId, projectId),
+    listProjectReportsForOwner(userId, projectId),
+    listProjectEvents(userId, projectId, 50),
+  ]);
+  return { brief, workPlans, criteria, dependencyGraph, artifacts, contextPackages, reports, timeline };
 }
 
 export async function listProjectCommands(userId: number, projectId: number, limit = 50) {

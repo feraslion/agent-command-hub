@@ -120,6 +120,13 @@
       "when": 1787214167978,
       "tag": "0016_exotic_vulture",
       "breakpoints": true
+    },
+    {
+      "idx": 17,
+      "version": "5",
+      "when": 1787248630680,
+      "tag": "0017_equal_shotgun",
+      "breakpoints": true
     }
   ]
 }

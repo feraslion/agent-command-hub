@@ -32,6 +32,32 @@ describe("platform API security", () => {
     await expect(caller.projects.create({ name: "x", code: "bad code" })).rejects.toMatchObject({ code: "BAD_REQUEST" });
   });
 
+  it("يرفض قراءة حوكمة المشروع من دون جلسة مستخدم", async () => {
+    const caller = appRouter.createCaller(contextWithUser(null));
+    await expect(caller.governance.get({ projectId: 1 })).rejects.toMatchObject({ code: "UNAUTHORIZED" });
+  });
+
+  it("يفرض حدود مصادر حزمة السياق قبل الوصول لقاعدة البيانات", async () => {
+    const caller = appRouter.createCaller(contextWithUser({
+      id: 1,
+      openId: "owner",
+      email: "owner@example.com",
+      name: "Owner",
+      loginMethod: "manus",
+      role: "admin",
+      createdAt: new Date(),
+      updatedAt: new Date(),
+      lastSignedIn: new Date(),
+    }));
+    await expect(caller.governance.createContextPackage({
+      projectId: 1,
+      title: "حزمة",
+      includeBrief: true,
+      taskIds: Array.from({ length: 13 }, (_, index) => index + 1),
+      artifactIds: [],
+    })).rejects.toMatchObject({ code: "BAD_REQUEST" });
+  });
+
   it("يرفض أمر تشغيل لا يحتوي معرّف مشروع صالح قبل الوصول لقاعدة البيانات", async () => {
     const caller = appRouter.createCaller(contextWithUser({
       id: 1,

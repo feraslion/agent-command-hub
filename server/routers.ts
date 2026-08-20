@@ -85,6 +85,11 @@ export const appRouter = router({
     getStatus: protectedProcedure.query(async ({ ctx }) => ({ worker: await db.getWorkerSettingsForOwner(ctx.user.id), loop: getDryWorkerLoopStatus() })),
     setDesiredState: protectedProcedure.input(z.object({ enabled: z.boolean() })).mutation(({ ctx, input }) => db.setWorkerDesiredState(ctx.user.id, input.enabled)),
   }),
+  localRunners: router({
+    list: protectedProcedure.query(({ ctx }) => db.listLocalRunnersForOwner(ctx.user.id)),
+    createPairing: protectedProcedure.input(z.object({ label: z.string().trim().min(2).max(128) })).mutation(({ ctx, input }) => db.createLocalRunnerPairingForOwner(ctx.user.id, input.label)),
+    revoke: protectedProcedure.input(z.object({ runnerId: z.number().int().positive() })).mutation(({ ctx, input }) => db.revokeLocalRunnerForOwner(ctx.user.id, input.runnerId)),
+  }),
   approvals: router({
     list: protectedProcedure.input(projectIdInput).query(({ ctx, input }) => db.listProjectApprovals(ctx.user.id, input.projectId)),
     inbox: protectedProcedure.input(z.object({ limit: z.number().int().min(1).max(200).optional() }).optional()).query(({ ctx, input }) => db.listOwnerApprovalsWithEngineContext(ctx.user.id, input?.limit ?? 100)),
@@ -140,7 +145,8 @@ export const appRouter = router({
     requestGate: protectedProcedure.input(projectIdInput.extend({ kind: z.enum(["git_gate", "publish_gate", "delete_gate"]) })).mutation(({ ctx, input }) => db.requestSandboxGateForProject(ctx.user.id, input)),
   }),
   isolatedRuntime: router({
-    status: protectedProcedure.query(() => db.isolatedRuntimeEnvironment),
+    status: protectedProcedure.query(({ ctx }) => db.getIsolatedRuntimeStatusForOwner(ctx.user.id)),
+    listForOwner: protectedProcedure.query(({ ctx }) => db.listOwnerIsolatedRuntimeRequests(ctx.user.id)),
     listRequests: protectedProcedure.input(projectIdInput.extend({ limit: z.number().int().min(1).max(100).optional() })).query(({ ctx, input }) => db.listIsolatedRuntimeRequestsForProject(ctx.user.id, input.projectId, input.limit ?? 50)),
     requestExecution: protectedProcedure.input(projectIdInput.extend({ targetPath: z.string().trim().min(1).max(512), engineRunId: z.number().int().positive().optional() })).mutation(({ ctx, input }) => db.requestIsolatedRuntimeExecution(ctx.user.id, input)),
   }),

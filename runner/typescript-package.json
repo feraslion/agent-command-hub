@@ -1,0 +1,8 @@
+{
+  "name": "agenthub-runner-typescript",
+  "private": true,
+  "version": "1.0.0",
+  "dependencies": {
+    "typescript": "5.7.3"
+  }
+}

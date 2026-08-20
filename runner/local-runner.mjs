@@ -1,0 +1,217 @@
+#!/usr/bin/env node
+/**
+ * Agent Command Hub local Runner — phase 1.
+ *
+ * This client accepts only an issued runner key/token pair, claims approved
+ * node_script requests, writes one validated standalone source file into a
+ * temporary directory, and invokes it inside a hardened Docker container.
+ * It never mounts a user directory, sends host environment variables, or
+ * accepts the image/command from the server.
+ */
+import { chmod, mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { randomUUID } from "node:crypto";
+import { spawn } from "node:child_process";
+import { dockerRecoveryGuide } from "./docker-support.mjs";
+
+const NODE_IMAGE = "node:22-alpine";
+const TYPESCRIPT_IMAGE = "agenthub-runner-ts:5.7.3";
+const POLL_MS = 5_000;
+const TIMEOUT_MS = 15_000;
+const OUTPUT_LIMIT = 8_000;
+const BLOCKED = [
+  /\bimport\s*(?:\(|[\w{*])/u,
+  /\brequire\s*\(/u,
+  /\bchild_process\b/u,
+  /\bprocess\.env\b/u,
+  /\bfetch\s*\(/u,
+  /\b(?:http|https|net|tls|dgram|cluster|worker_threads|vm|fs)\b/u,
+  /\b(?:eval|Function)\s*\(/u,
+];
+
+function usage() {
+  console.error("Usage: node runner/local-runner.mjs --server https://host --runner runner-key --token runner-token [--once] | --preflight");
+  process.exitCode = 2;
+}
+
+function readArgs(argv) {
+  const values = {};
+  for (let index = 0; index < argv.length; index += 1) {
+    const key = argv[index];
+    if (!key.startsWith("--")) continue;
+    const name = key.slice(2);
+    if (name === "once" || name === "preflight") values[name] = true;
+    else values[name] = argv[index + 1];
+  }
+  return values;
+}
+
+function capped(current, next) {
+  if (current.length >= OUTPUT_LIMIT) return current;
+  return `${current}${next}`.slice(0, OUTPUT_LIMIT);
+}
+
+function assertPayload(payload) {
+  if (!payload || !["node_script", "typescript_lockfile"].includes(payload.profile) || typeof payload.targetPath !== "string" || typeof payload.content !== "string") {
+    throw new Error("Runner received an invalid execution payload.");
+  }
+  const normalized = payload.targetPath.replaceAll("\\", "/");
+  const [directory, ...rest] = normalized.split("/");
+  const ext = path.extname(normalized).toLowerCase();
+  if (!["source", "tests"].includes(directory) || rest.length === 0 || !/^(?:source|tests)(?:\/[A-Za-z0-9._-]+)+\.(?:js|mjs|cjs|ts)$/u.test(normalized)) {
+    throw new Error("Runner rejected the workspace path or file extension.");
+  }
+  if ((payload.profile === "typescript_lockfile") !== (ext === ".ts")) throw new Error("Runner rejected a profile that does not match the file extension.");
+  if (!payload.content.trim() || Buffer.byteLength(payload.content, "utf8") > 32_000 || BLOCKED.some((pattern) => pattern.test(payload.content))) {
+    throw new Error("Runner rejected source that exceeds the local safety policy.");
+  }
+  return { normalized, profile: payload.profile };
+}
+
+function run(command, args, options = {}) {
+  return new Promise((resolve) => {
+    const child = spawn(command, args, { ...options, stdio: ["ignore", "pipe", "pipe"] });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk) => { stdout = capped(stdout, chunk.toString()); });
+    child.stderr.on("data", (chunk) => { stderr = capped(stderr, chunk.toString()); });
+    child.once("error", (error) => resolve({ code: 1, stdout, stderr: capped(stderr, error.message) }));
+    child.once("close", (code) => resolve({ code: code ?? 1, stdout, stderr }));
+  });
+}
+
+async function hostPlatform() {
+  if (process.platform !== "linux") return { platform: process.platform };
+  try {
+    const osRelease = await readFile("/etc/os-release", "utf8");
+    const linuxId = osRelease.match(/^ID=(?:"?)([A-Za-z0-9_-]+)(?:"?)$/mu)?.[1]?.toLowerCase() ?? "";
+    return { platform: process.platform, linuxId };
+  } catch {
+    return { platform: process.platform, linuxId: "" };
+  }
+}
+
+async function assertDockerReady() {
+  const recovery = dockerRecoveryGuide(await hostPlatform());
+  const daemon = await run("docker", ["info", "--format", "{{.Server.Version}}"]);
+  if (daemon.code !== 0 || !daemon.stdout.trim()) {
+    throw new Error(`Docker preflight failed: the Docker daemon is unavailable. ${recovery}${daemon.stderr ? ` Docker reported: ${daemon.stderr.trim()}` : ""}`);
+  }
+
+  for (const image of [NODE_IMAGE, TYPESCRIPT_IMAGE]) {
+    const imageCheck = await run("docker", ["image", "inspect", image, "--format", "{{.Id}}"]);
+    if (imageCheck.code !== 0 || !imageCheck.stdout.trim()) {
+      const recovery = image === TYPESCRIPT_IMAGE
+        ? "Run ./runner/device/build-typescript-image.sh on this device."
+        : `Run docker pull ${NODE_IMAGE}.`;
+      throw new Error(`Docker preflight failed: required image ${image} is unavailable. ${recovery}`);
+    }
+  }
+
+  console.log(`[runner] Docker ready (server ${daemon.stdout.trim()}, images verified).`);
+}
+
+async function execute(payload) {
+  const { normalized: targetPath, profile } = assertPayload(payload);
+  const workspace = await mkdtemp(path.join(tmpdir(), "agenthub-runner-"));
+  const targetFile = path.resolve(workspace, targetPath);
+  const containerName = `agenthub-${payload.requestId}-${randomUUID().slice(0, 8)}`;
+  const startedAt = Date.now();
+
+  try {
+    if (!targetFile.startsWith(`${workspace}${path.sep}`)) throw new Error("Runner rejected path traversal.");
+    await chmod(workspace, 0o755);
+    await mkdir(path.dirname(targetFile), { recursive: true, mode: 0o755 });
+    await chmod(path.dirname(targetFile), 0o755);
+    await writeFile(targetFile, payload.content, { encoding: "utf8", mode: 0o444 });
+
+    const runtimeCommand = profile === "typescript_lockfile"
+      ? ["sh", "-ceu", `/runtime/node_modules/.bin/tsc --pretty false --target ES2022 --module NodeNext --moduleResolution NodeNext --outDir /tmp/compiled --rootDir /workspace -- /${targetPath} && node --disable-proto=throw --frozen-intrinsics /tmp/compiled/${targetPath.replace(/\.ts$/u, ".js")}`]
+      : ["node", "--disable-proto=throw", "--frozen-intrinsics", `/${targetPath}`];
+    const dockerArgs = [
+      "run", "--rm", "--name", containerName,
+      "--network", "none",
+      "--read-only",
+      "--tmpfs", "/tmp:rw,nosuid,nodev,noexec,size=16m",
+      "--cap-drop", "ALL",
+      "--security-opt", "no-new-privileges",
+      "--pids-limit", "64",
+      "--memory", "256m",
+      "--cpus", "0.5",
+      "--user", "1000:1000",
+      "--workdir", "/workspace",
+      "--mount", `type=bind,src=${workspace},dst=/workspace,readonly`,
+      profile === "typescript_lockfile" ? TYPESCRIPT_IMAGE : NODE_IMAGE,
+      ...runtimeCommand,
+    ];
+    const execution = await new Promise((resolve) => {
+      const timeout = setTimeout(async () => {
+        await run("docker", ["kill", containerName]);
+        resolve({ code: 124, stdout: "", stderr: "Execution timed out after 15 seconds." });
+      }, TIMEOUT_MS);
+      void run("docker", dockerArgs).then((result) => {
+        clearTimeout(timeout);
+        resolve(result);
+      });
+    });
+    return { ...execution, durationMs: Date.now() - startedAt };
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+}
+
+async function main() {
+  const args = readArgs(process.argv.slice(2));
+  if (args.preflight) {
+    await assertDockerReady();
+    return;
+  }
+  if (typeof args.server !== "string" || typeof args.runner !== "string" || typeof args.token !== "string") return usage();
+  await assertDockerReady();
+  const baseUrl = args.server.replace(/\/+$/, "");
+  const headers = { "content-type": "application/json", authorization: `Bearer ${args.token}`, "x-agenthub-runner": args.runner };
+  const call = async (pathName, body = {}) => {
+    const response = await fetch(`${baseUrl}${pathName}`, { method: "POST", headers, body: JSON.stringify(body) });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(payload.error ?? `Runner API returned ${response.status}.`);
+    return payload;
+  };
+
+  const tick = async () => {
+    await call("/api/local-runner/heartbeat", { capabilities: { profiles: ["node_script", "typescript_lockfile"], docker: true, typescriptImage: TYPESCRIPT_IMAGE } });
+    const claim = await call("/api/local-runner/claim");
+    if (!claim.request) return false;
+    let result;
+    try {
+      result = await execute(claim.request);
+    } catch (error) {
+      result = { code: 1, stdout: "", stderr: error instanceof Error ? error.message : "Runner failed unexpectedly.", durationMs: 0 };
+    }
+    await call("/api/local-runner/report", {
+      requestId: claim.request.requestId,
+      status: result.code === 0 ? "completed" : "failed",
+      exitCode: result.code,
+      stdout: result.stdout,
+      stderr: result.stderr,
+      durationMs: result.durationMs,
+    });
+    console.log(`[runner] ${claim.request.requestId} ${result.code === 0 ? "completed" : "failed"} in ${result.durationMs}ms`);
+    return true;
+  };
+
+  do {
+    try {
+      await tick();
+    } catch (error) {
+      console.error(`[runner] ${error instanceof Error ? error.message : "unknown error"}`);
+      if (args.once) process.exitCode = 1;
+    }
+    if (!args.once) await new Promise((resolve) => setTimeout(resolve, POLL_MS));
+  } while (!args.once);
+}
+
+void main().catch((error) => {
+  console.error(`[runner] ${error instanceof Error ? error.message : "Runner failed unexpectedly."}`);
+  process.exitCode = 1;
+});

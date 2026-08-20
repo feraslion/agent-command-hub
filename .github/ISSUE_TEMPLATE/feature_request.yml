@@ -1,0 +1,91 @@
+name: طلب ميزة جديدة
+description: اقترح تحسينًا أو قدرة جديدة مع مشكلة واضحة ومعايير قبول قابلة للمراجعة.
+title: "[ميزة]: "
+labels: []
+body:
+  - type: markdown
+    attributes:
+      value: |
+        صف المشكلة والنتيجة المطلوبة بوضوح. لا تضع أسرارًا أو رموز وصول أو بيانات شخصية أو محتوى حساسًا كاملاً في الطلب.
+
+  - type: input
+    id: title
+    attributes:
+      label: عنوان الميزة
+      description: اكتب عنوانًا موجزًا يصف القيمة المطلوبة.
+      placeholder: مثال: إضافة سجل تدقيق لتغييرات لغة قالب الوكيل.
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: المشكلة أو الحاجة
+      description: ما المشكلة الحالية؟ ومن المتأثر بها؟
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: الحل المقترح
+      description: صف التدفق المتوقع من منظور المستخدم، وليس فقط طريقة التنفيذ التقنية.
+    validations:
+      required: true
+
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: معايير القبول
+      description: اذكر نتائج قابلة للتحقق تحدد متى تصبح الميزة مكتملة.
+      placeholder: |
+        - يستطيع المستخدم ...
+        - يظهر النظام ...
+        - تمر الفحوصات ...
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: المجال المقترح
+      options:
+        - الواجهة والتجربة
+        - الوكلاء وقوالب System Prompt
+        - Workspace والمحرر
+        - Task Engine والموافقات
+        - Runtime أو العامل
+        - Android أو البناء
+        - GitHub والجودة
+        - غير ذلك
+    validations:
+      required: true
+
+  - type: dropdown
+    id: priority
+    attributes:
+      label: الأولوية المقترحة
+      options:
+        - عالية — تعالج عائقًا لعمل أساسي
+        - متوسطة — تحسن تدفقًا شائعًا
+        - منخفضة — تحسين اختياري أو تجميلي
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: البدائل أو الحلول المؤقتة
+      description: ما الذي جربته؟ وهل توجد طريقة أخرى لمعالجة الحاجة؟
+
+  - type: checkboxes
+    id: impact
+    attributes:
+      label: الأثر والسياسات
+      options:
+        - label: لا تتطلب الميزة المقترحة وصولًا إلى أسرار أو تنفيذ شيفرة مستخدم أو شبكة خارجية.
+          required: false
+        - label: قد تمس الميزة Workspace أو Runtime أو الصلاحيات أو النشر، وتحتاج دراسة REVIEW أو APPROVAL.
+          required: false
+        - label: بحثت عن طلبات ميزات مشابهة قبل إنشاء هذا الطلب.
+          required: true

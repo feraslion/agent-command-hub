@@ -1,0 +1,98 @@
+name: الإبلاغ عن خطأ
+description: أبلغ عن سلوك غير متوقع مع خطوات واضحة لإعادة الإنتاج.
+title: "[خطأ]: "
+labels: []
+body:
+  - type: markdown
+    attributes:
+      value: |
+        شكرًا للمساعدة في تحسين Agent Command Hub. لا تضع أسرارًا أو رموز وصول أو بيانات شخصية أو محتوى حساسًا كاملاً في هذا النموذج.
+
+  - type: input
+    id: summary
+    attributes:
+      label: ملخص الخطأ
+      description: صف المشكلة في جملة واضحة ومحددة.
+      placeholder: مثال: لا تُفتح معاينة System Prompt بعد اختيار قالب Debugger.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: خطوات إعادة الإنتاج
+      description: اذكر أقل خطوات ثابتة تؤدي إلى المشكلة.
+      placeholder: |
+        1. افتح تبويب الوكلاء.
+        2. اختر وكيل Debugger.
+        3. اضغط «معاينة النص النهائي».
+        4. لاحظ النتيجة.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: السلوك المتوقع
+      description: ما الذي توقعت حدوثه؟
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: السلوك الفعلي والأثر
+      description: ما الذي حدث فعليًا؟ ومن المتأثر؟
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: المجال المتأثر
+      options:
+        - الواجهة والتجربة
+        - الوكلاء وقوالب System Prompt
+        - Workspace والمحرر
+        - Task Engine والموافقات
+        - Runtime أو العامل
+        - Android أو البناء
+        - GitHub والجودة
+        - غير ذلك
+    validations:
+      required: true
+
+  - type: dropdown
+    id: severity
+    attributes:
+      label: مستوى الأثر
+      options:
+        - حرج — يمنع استخدام الوظيفة الأساسية
+        - مرتفع — يعطل تدفقًا مهمًا مع وجود حل مؤقت محدود
+        - متوسط — يؤثر في جزء من المستخدمين أو الحالات
+        - منخفض — مشكلة عرض أو تجربة محدودة
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: البيئة والسياق
+      description: اذكر المنصة أو المتصفح أو إصدار التطبيق والحالة ذات الصلة، من دون أي بيانات حساسة.
+      placeholder: "مثال: Android 14، نسخة التطبيق 1.0.0، الوضع الداكن، مشروع تجريبي."
+
+  - type: textarea
+    id: evidence
+    attributes:
+      label: الأدلة الإضافية
+      description: أضف رسالة خطأ منقحة أو لقطة شاشة أو رابط تشغيل. أخفِ الأسرار والمعرفات الخاصة.
+
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: التحقق من الخصوصية
+      options:
+        - label: راجعت البلاغ ولم أدرج أسرارًا أو رموز وصول أو بيانات شخصية.
+          required: true
+        - label: تحققت من وجود بلاغ مشابه قبل إنشاء هذا البلاغ.
+          required: true

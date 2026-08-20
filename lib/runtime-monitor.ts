@@ -1,4 +1,12 @@
 export type RuntimeFilter = "all" | "active" | "attention" | "failed";
+export type RuntimeEventType = "all" | "execution" | "approval" | "environment" | "policy";
+export type RuntimeSeverity = "all" | "info" | "warning" | "critical";
+
+export type RuntimeLogFilters = {
+  status: RuntimeFilter;
+  eventType: RuntimeEventType;
+  severity: RuntimeSeverity;
+};
 
 export type RuntimeMonitorRecord = {
   request: {
@@ -10,11 +18,36 @@ const activeStatuses = new Set(["queued", "claimed"]);
 const attentionStatuses = new Set(["awaiting_approval", "environment_required", "blocked"]);
 const failedStatuses = new Set(["failed", "cancelled", "blocked"]);
 
-export function filterRuntimeRecords<T extends RuntimeMonitorRecord>(records: T[], filter: RuntimeFilter): T[] {
-  if (filter === "all") return records;
-  if (filter === "active") return records.filter((record) => activeStatuses.has(record.request.status));
-  if (filter === "attention") return records.filter((record) => attentionStatuses.has(record.request.status));
-  return records.filter((record) => failedStatuses.has(record.request.status));
+/**
+ * يشتق تصنيف الحدث من حالة طلب Runtime الحالية؛ لا يضيف بيانات تشغيلية
+ * جديدة ولا يغير سجل التنفيذ الدائم.
+ */
+export function getRuntimeEventType(status: string): Exclude<RuntimeEventType, "all"> {
+  if (status === "awaiting_approval" || status === "approved") return "approval";
+  if (status === "environment_required") return "environment";
+  if (status === "blocked") return "policy";
+  return "execution";
+}
+
+/** تحدد الأهمية كي يمكن عزل المشاكل دون إخفاء السجل التشغيلي المعتاد. */
+export function getRuntimeSeverity(status: string): Exclude<RuntimeSeverity, "all"> {
+  if (status === "failed" || status === "blocked") return "critical";
+  if (status === "awaiting_approval" || status === "environment_required") return "warning";
+  return "info";
+}
+
+export function filterRuntimeRecords<T extends RuntimeMonitorRecord>(records: T[], filters: RuntimeLogFilters): T[] {
+  return records.filter((record) => {
+    const { status } = record.request;
+    const matchesStatus = filters.status === "all"
+      || (filters.status === "active" && activeStatuses.has(status))
+      || (filters.status === "attention" && attentionStatuses.has(status))
+      || (filters.status === "failed" && failedStatuses.has(status));
+    const matchesEventType = filters.eventType === "all" || getRuntimeEventType(status) === filters.eventType;
+    const matchesSeverity = filters.severity === "all" || getRuntimeSeverity(status) === filters.severity;
+
+    return matchesStatus && matchesEventType && matchesSeverity;
+  });
 }
 
 export function getRuntimeStats<T extends RuntimeMonitorRecord>(records: T[], pendingApprovals: number, runnerStatuses: string[]) {

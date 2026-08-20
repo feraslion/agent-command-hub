@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { buildRuntimeWebSocketUrl, isRuntimeInvalidation } from "../lib/runtime-realtime-protocol";
+import { buildRuntimeWebSocketUrl, getRuntimeConnectionPresentation, isRuntimeInvalidation } from "../lib/runtime-realtime-protocol";
 
 describe("runtime realtime helpers", () => {
   it("converts secure and local API origins into a websocket endpoint", () => {
@@ -13,5 +13,11 @@ describe("runtime realtime helpers", () => {
     expect(isRuntimeInvalidation({ type: "runtime.invalidate", resources: ["approvals"] })).toBe(true);
     expect(isRuntimeInvalidation({ type: "runtime.ready" })).toBe(false);
     expect(isRuntimeInvalidation(null)).toBe(false);
+  });
+
+  it("presents an explicit label for each visible connection state", () => {
+    expect(getRuntimeConnectionPresentation("live").label).toContain("متصل");
+    expect(getRuntimeConnectionPresentation("connecting").label).toContain("منقطع");
+    expect(getRuntimeConnectionPresentation("fallback").label).toContain("الاستعلام التلقائي");
   });
 });

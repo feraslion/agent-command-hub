@@ -33,6 +33,7 @@ import { sandboxGateDetail, sandboxGateKinds, sandboxGateTitle } from "./sandbox
 import { assessSensitiveWorkspaceChange } from "../lib/sensitive-workspace-policy";
 import { assertWorkspaceContent, normalizeWorkspacePath, WorkspacePathError } from "./workspace-policy";
 import { assertLocalRunnerExecutable, truncateRunnerOutput } from "./local-runner-policy";
+import { broadcastRuntimeUpdate } from "./runtime-realtime";
 
 let _db: ReturnType<typeof drizzle> | null = null;
 
@@ -433,6 +434,7 @@ export async function heartbeatLocalRunner(input: { runnerKey: string; token: st
     capabilities: input.capabilities ? JSON.stringify(input.capabilities) : runner.capabilities,
     lastHeartbeatAt: new Date(),
   }).where(eq(localRunners.id, runner.id));
+  broadcastRuntimeUpdate(runner.ownerId, "runner");
   return (await db.select().from(localRunners).where(eq(localRunners.id, runner.id)).limit(1))[0];
 }
 
@@ -469,6 +471,7 @@ export async function claimLocalRuntimeRequest(input: { runnerKey: string; token
     throw error;
   }
   await db.update(localRunners).set({ status: "busy", lastHeartbeatAt: new Date() }).where(eq(localRunners.id, runner.id));
+  broadcastRuntimeUpdate(runner.ownerId, "request");
   await recordWorkspaceAudit(candidate.workspaceId, { actor: runner.runnerKey, action: "sandbox_checked", path: candidate.targetPath, detail: "حجز Runner محلي طلباً معتمداً للتنفيذ داخل حاوية مقيدة." });
   await recordExecutionEvent(runner.ownerId, candidate.projectId, { actor: runner.runnerKey, type: "ISOLATED_RUNTIME_CLAIMED", label: "حجز Runner محلي طلب تنفيذ", detail: candidate.targetPath });
   return { requestId: candidate.id, targetPath: executable.normalizedPath, profile: executable.profile, content: file.content };
@@ -497,6 +500,7 @@ export async function reportLocalRuntimeRequest(input: { runnerKey: string; toke
     completedAt: new Date(),
   }).where(eq(isolatedRuntimeRequests.id, request.id));
   await db.update(localRunners).set({ status: "ready", lastHeartbeatAt: new Date() }).where(eq(localRunners.id, runner.id));
+  broadcastRuntimeUpdate(runner.ownerId, "request");
   await recordWorkspaceAudit(request.workspaceId, { actor: runner.runnerKey, action: "sandbox_checked", path: request.targetPath, detail: status === "completed" ? "اكتمل التنفيذ المحدود داخل الحاوية بنجاح." : "انتهى التنفيذ المحدود داخل الحاوية بفشل؛ راجع المخرجات المقتطعة." });
   await recordExecutionEvent(runner.ownerId, request.projectId, { actor: runner.runnerKey, type: status === "completed" ? "ISOLATED_RUNTIME_COMPLETED" : "ISOLATED_RUNTIME_FAILED", label: status === "completed" ? "اكتمل تنفيذ معزول" : "فشل تنفيذ معزول", detail: `${request.targetPath} · exit ${input.exitCode}` });
   return (await db.select().from(isolatedRuntimeRequests).where(eq(isolatedRuntimeRequests.id, request.id)).limit(1))[0];
@@ -549,6 +553,7 @@ export async function requestIsolatedRuntimeExecution(userId: number, input: { p
     });
     await recordWorkspaceAudit(workspace.id, { actor: "Isolated Runtime Gate", action: "tool_rejected", path, detail });
     await recordExecutionEvent(userId, input.projectId, { actor: "Isolated Runtime Gate", type: "ISOLATED_RUNTIME_RUNNER_REQUIRED", label: "حُجب التنفيذ بانتظار Runner متوافق", detail: path });
+    broadcastRuntimeUpdate(userId, "request");
     return (await db.select().from(isolatedRuntimeRequests).where(eq(isolatedRuntimeRequests.id, Number(result.insertId))).limit(1))[0];
   }
   const approval = await createApprovalRequest(userId, {
@@ -573,6 +578,7 @@ export async function requestIsolatedRuntimeExecution(userId: number, input: { p
   });
   await recordWorkspaceAudit(workspace.id, { actor: "Isolated Runtime Gate", action: "gate_requested", path, detail: "أُنشئ طلب موافقة لتنفيذ محدود عبر Runner محلي؛ لم تُشغّل شيفرة بعد." });
   await recordExecutionEvent(userId, input.projectId, { actor: "Isolated Runtime Gate", type: "ISOLATED_RUNTIME_APPROVAL_REQUESTED", label: "طلب موافقة لتنفيذ معزول", detail: path });
+  broadcastRuntimeUpdate(userId, "approval");
   return (await db.select().from(isolatedRuntimeRequests).where(eq(isolatedRuntimeRequests.id, Number(result.insertId))).limit(1))[0];
 }
 
@@ -1047,6 +1053,7 @@ export async function createApprovalRequest(userId: number, input: { projectId: 
     label: input.level === "auto" ? "تم تنفيذ إجراء تلقائي" : "طلب موافقة",
     detail: input.title,
   });
+  broadcastRuntimeUpdate(userId, "approval");
   return (await db.select().from(approvals).where(eq(approvals.id, approvalId)).limit(1))[0];
 }
 
@@ -1081,6 +1088,7 @@ export async function resolveApproval(userId: number, input: { projectId: number
   }
   const [engineStep] = await db.select().from(taskEngineSteps).where(eq(taskEngineSteps.approvalId, input.approvalId)).limit(1);
   const engineTransition = engineStep ? await advanceTaskEngineRunForProject(userId, { projectId: input.projectId, runId: engineStep.runId }) : null;
+  broadcastRuntimeUpdate(userId, runtimeTransition ? "request" : "approval");
   return { approval: (await db.select().from(approvals).where(eq(approvals.id, input.approvalId)).limit(1))[0], engineTransition, sensitiveChangeTransition, runtimeTransition };
 }
 

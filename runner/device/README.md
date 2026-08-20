@@ -6,7 +6,8 @@
 | --- | --- |
 | `build-typescript-image.sh` | بناء صورة TypeScript الثابتة من lockfile المشروع. |
 | `smoke-test-typescript.sh` | اختبار محلي آمن للصورة، بلا شبكة وبنفس حدود حاوية الـ Runner. |
-| `run-local-runner.sh` | تشغيل عميل Runner بعد إنشاء مفتاح ورمز ربط من التطبيق. |
+| `.env.runner.example` | مثال لإعداد محلي يحفظ عنوان الخادم ومفتاح Runner ورمز الربط. |
+| `run-local-runner.sh` | يتحقق من الإعداد ثم يشغل عميل Runner بعد فحص Docker التمهيدي. |
 
 ## المتطلبات
 
@@ -28,17 +29,31 @@
 
 ينشئ الاختبار ملف TypeScript حسابياً مؤقتاً فقط، ثم يترجمه ويشغله في حاوية بلا شبكة، بجذر قراءة فقط، وبحدود 15 ثانية و256MB و0.5 CPU. النتيجة المتوقعة هي `runner-ts-smoke: 42`.
 
-## 3. تشغيل Runner المرتبط
+## 3. إعداد متغيرات Runner محلياً
 
-أنشئ Runner من إعدادات Agent Command Hub، وانسخ المفتاح والرمز لمرة واحدة، ثم مررهما كوسائط مباشرة بدلاً من حفظهما في ملف:
+انسخ ملف المثال إلى ملفك المحلي المستثنى من Git، ثم احصر قراءته على حسابك. لا تضف علامات اقتباس أو أوامر shell أو تعليقات في نهاية السطر؛ كل قيمة تعامل كقيمة حرفية.
 
 ```bash
-./runner/device/run-local-runner.sh \
-  https://YOUR-AGENT-HUB-DOMAIN \
-  RUNNER_KEY \
-  RUNNER_TOKEN
+cp runner/device/.env.runner.example runner/device/.env.runner
+chmod 600 runner/device/.env.runner
 ```
 
-لإجراء نبضة واحدة بدلاً من الاستماع المستمر، أضف `--once` في نهاية الأمر. بعد تشغيل العميل، أنشئ طلب تنفيذ ملف مستقل داخل `source/` أو `tests/`، اعتمده من مركز التحكم، ثم راقب الحالة وstdout وstderr ورمز الخروج والمدة في تبويب **Runtime**.
+حرر ملف `.env.runner` وضع نطاق التطبيق ومفتاح Runner والرمز الذي أصدره التطبيق. قبل التشغيل، تحقق من الملف وDocker تلقائياً من دون طباعة الرمز:
+
+```bash
+./runner/device/run-local-runner.sh --check-config
+```
+
+يفحص الأمر تمهيدياً توفر عميل Docker، ووصوله إلى Docker Engine، ووجود صورتي `node:22-alpine` و`agenthub-runner-ts:5.7.3`. إذا غابت الصورة الأولى، نفذ `docker pull node:22-alpine`؛ وإذا غابت الثانية، نفذ `./runner/device/build-typescript-image.sh`. يمنع Runner الاتصال بالخادم أو تنفيذ طلبات عند فشل هذا الفحص.
+
+## 4. تشغيل Runner المرتبط
+
+بعد إكمال ملف الإعداد، شغل Runner:
+
+```bash
+./runner/device/run-local-runner.sh
+```
+
+لإجراء نبضة واحدة بدلاً من الاستماع المستمر، نفذ `./runner/device/run-local-runner.sh --once`، أو غيّر `AGENTHUB_RUN_ONCE=true` في ملف الإعداد. تبقى صيغة الوسائط المباشرة مدعومة للتوافق: `./runner/device/run-local-runner.sh SERVER_URL RUNNER_KEY RUNNER_TOKEN [--once]`. بعد تشغيل العميل، أنشئ طلب تنفيذ ملف مستقل داخل `source/` أو `tests/`، اعتمده من مركز التحكم، ثم راقب الحالة وstdout وstderr ورمز الخروج والمدة في تبويب **Runtime**.
 
 > لا يربط الـ Runner مجلد المستخدم داخل الحاوية، ولا يمرر متغيرات بيئة المضيف إليها، ولا يقبل صورة Docker أو أمراً قادماً من الخادم.

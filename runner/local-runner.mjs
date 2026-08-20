@@ -30,7 +30,7 @@ const BLOCKED = [
 ];
 
 function usage() {
-  console.error("Usage: node runner/local-runner.mjs --server https://host --runner runner-key --token runner-token [--once]");
+  console.error("Usage: node runner/local-runner.mjs --server https://host --runner runner-key --token runner-token [--once] | --preflight");
   process.exitCode = 2;
 }
 
@@ -40,7 +40,7 @@ function readArgs(argv) {
     const key = argv[index];
     if (!key.startsWith("--")) continue;
     const name = key.slice(2);
-    if (name === "once") values.once = true;
+    if (name === "once" || name === "preflight") values[name] = true;
     else values[name] = argv[index + 1];
   }
   return values;
@@ -78,6 +78,25 @@ function run(command, args, options = {}) {
     child.once("error", (error) => resolve({ code: 1, stdout, stderr: capped(stderr, error.message) }));
     child.once("close", (code) => resolve({ code: code ?? 1, stdout, stderr }));
   });
+}
+
+async function assertDockerReady() {
+  const daemon = await run("docker", ["info", "--format", "{{.Server.Version}}"]);
+  if (daemon.code !== 0 || !daemon.stdout.trim()) {
+    throw new Error(`Docker preflight failed: the Docker daemon is unavailable. Start Docker Desktop or Docker Engine, then retry.${daemon.stderr ? ` ${daemon.stderr.trim()}` : ""}`);
+  }
+
+  for (const image of [NODE_IMAGE, TYPESCRIPT_IMAGE]) {
+    const imageCheck = await run("docker", ["image", "inspect", image, "--format", "{{.Id}}"]);
+    if (imageCheck.code !== 0 || !imageCheck.stdout.trim()) {
+      const recovery = image === TYPESCRIPT_IMAGE
+        ? "Run ./runner/device/build-typescript-image.sh on this device."
+        : `Run docker pull ${NODE_IMAGE}.`;
+      throw new Error(`Docker preflight failed: required image ${image} is unavailable. ${recovery}`);
+    }
+  }
+
+  console.log(`[runner] Docker ready (server ${daemon.stdout.trim()}, images verified).`);
 }
 
 async function execute(payload) {
@@ -131,7 +150,12 @@ async function execute(payload) {
 
 async function main() {
   const args = readArgs(process.argv.slice(2));
+  if (args.preflight) {
+    await assertDockerReady();
+    return;
+  }
   if (typeof args.server !== "string" || typeof args.runner !== "string" || typeof args.token !== "string") return usage();
+  await assertDockerReady();
   const baseUrl = args.server.replace(/\/+$/, "");
   const headers = { "content-type": "application/json", authorization: `Bearer ${args.token}`, "x-agenthub-runner": args.runner };
   const call = async (pathName, body = {}) => {
@@ -174,4 +198,7 @@ async function main() {
   } while (!args.once);
 }
 
-void main();
+void main().catch((error) => {
+  console.error(`[runner] ${error instanceof Error ? error.message : "Runner failed unexpectedly."}`);
+  process.exitCode = 1;
+});

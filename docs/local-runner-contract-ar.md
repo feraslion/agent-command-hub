@@ -31,23 +31,28 @@
 ## تشغيل العميل على جهاز المالك
 
 1. اربط مجلد مشروع Agent Command Hub على جهازك في تطبيق Manus Desktop قبل نسخ أو تشغيل ملفات Runner، ثم ثبت Docker Desktop أو Docker Engine وشغله. تأكد أن المستخدم الحالي يملك صلاحية `docker run`.
-2. ابنِ صورة TypeScript المقيدة مرة واحدة من lockfile الثابت:
+2. انسخ `runner/device/.env.runner.example` إلى `runner/device/.env.runner`، ثم ضع فيه عنوان الخادم ومفتاح Runner والرمز. الملف الحقيقي مستثنى من Git؛ لا تضع فيه أوامر shell أو تعليقات في نهاية السطر.
+3. افحص Docker تلقائياً قبل أي اتصال بالخادم:
+
+```bash
+./runner/device/run-local-runner.sh --check-config
+```
+
+يتحقق الفحص من Docker CLI وDocker Engine وصورتي `node:22-alpine` و`agenthub-runner-ts:5.7.3`. يتوقف Runner قبل حجز أي طلب عند غياب أحدها.
+4. ابنِ صورة TypeScript المقيدة مرة واحدة من lockfile الثابت إذا طلب الفحص ذلك:
 
 ```bash
 docker build -f runner/Dockerfile.typescript -t agenthub-runner-ts:5.7.3 runner
 ```
 
-3. احصل على مفتاح Runner والرمز من إعدادات التطبيق، ثم شغل:
+5. شغل Runner من ملف الإعداد:
 
 ```bash
-node runner/local-runner.mjs \
-  --server https://YOUR-AGENT-HUB-DOMAIN \
-  --runner RUNNER_KEY \
-  --token RUNNER_TOKEN
+./runner/device/run-local-runner.sh
 ```
 
-4. افتح التطبيق، أنشئ ملفاً مستقلاً آمناً في `source/` أو `tests/`، واطلب التنفيذ. سيظهر طلب `APPROVAL` في مركز التحكم؛ اعتمده ثم راقب stdout وstderr والمدة ورمز الخروج من تبويب **Runtime**.
-5. لا تحفظ الرمز في Git أو في ملف مشترك. ألغ Runner من التطبيق فور فقد الجهاز أو الاشتباه في الرمز.
+6. افتح التطبيق، أنشئ ملفاً مستقلاً آمناً في `source/` أو `tests/`، واطلب التنفيذ. سيظهر طلب `APPROVAL` في مركز التحكم؛ اعتمده ثم راقب stdout وstderr والمدة ورمز الخروج من تبويب **Runtime**.
+7. لا تحفظ الرمز في Git أو في ملف مشترك. ألغ Runner من التطبيق فور فقد الجهاز أو الاشتباه في الرمز.
 
 ## التوسعة التالية
 

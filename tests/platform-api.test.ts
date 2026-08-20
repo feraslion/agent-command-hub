@@ -58,6 +58,22 @@ describe("platform API security", () => {
     })).rejects.toMatchObject({ code: "BAD_REQUEST" });
   });
 
+  it("يتحقق من دور بوابة النموذج ومعرّف حزمة السياق قبل الإرسال إلى النموذج", async () => {
+    const caller = appRouter.createCaller(contextWithUser({
+      id: 1,
+      openId: "owner",
+      email: "owner@example.com",
+      name: "Owner",
+      loginMethod: "manus",
+      role: "admin",
+      createdAt: new Date(),
+      updatedAt: new Date(),
+      lastSignedIn: new Date(),
+    }));
+    await expect(caller.agentModel.run({ projectId: 1, contextPackageId: 0, role: "planner" })).rejects.toMatchObject({ code: "BAD_REQUEST" });
+    await expect(caller.agentModel.run({ projectId: 1, contextPackageId: 1, role: "release" as never })).rejects.toMatchObject({ code: "BAD_REQUEST" });
+  });
+
   it("يرفض أمر تشغيل لا يحتوي معرّف مشروع صالح قبل الوصول لقاعدة البيانات", async () => {
     const caller = appRouter.createCaller(contextWithUser({
       id: 1,

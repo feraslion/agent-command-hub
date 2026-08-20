@@ -3,6 +3,7 @@ import { and, desc, eq, inArray, lt, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/mysql2";
 import {
   agentPromptAssignments,
+  agentModelRuns,
   agents,
   approvals,
   artifacts,
@@ -13,6 +14,8 @@ import {
   executionPlans,
   isolatedRuntimeRequests,
   localRunners,
+  modelCostReservations,
+  modelUsage,
   projectBriefs,
   projectReports,
   projects,
@@ -42,6 +45,7 @@ import { assertWorkspaceContent, normalizeWorkspacePath, WorkspacePathError } fr
 import { assertLocalRunnerExecutable, truncateRunnerOutput } from "./local-runner-policy";
 import { broadcastRuntimeUpdate } from "./runtime-realtime";
 import { buildProjectReportDraft, estimateContextTokens, getCriticalPathTaskIds, normalizeContextSourceRefs, type ContextSourceRef, wouldCreateDependencyCycle } from "../lib/project-governance";
+import { modelRolePolicies, type AgentModelRole } from "../lib/agent-model-policy";
 
 let _db: ReturnType<typeof drizzle> | null = null;
 
@@ -1172,6 +1176,81 @@ export async function getProjectGovernanceForOwner(userId: number, projectId: nu
     listProjectEvents(userId, projectId, 50),
   ]);
   return { brief, workPlans, criteria, dependencyGraph, artifacts, contextPackages, reports, timeline };
+}
+
+export async function listAgentModelRunsForProject(userId: number, projectId: number, limit = 50) {
+  const { db } = await requireOwnedProject(userId, projectId);
+  return db.select().from(agentModelRuns).where(eq(agentModelRuns.projectId, projectId)).orderBy(desc(agentModelRuns.createdAt)).limit(limit);
+}
+
+export async function getAgentModelRunContextForProject(userId: number, input: { projectId: number; contextPackageId: number; taskId?: number }) {
+  const { db, project } = await requireOwnedProject(userId, input.projectId);
+  const [contextPackage] = await db.select().from(contextPackages).where(and(eq(contextPackages.id, input.contextPackageId), eq(contextPackages.projectId, input.projectId))).limit(1);
+  if (!contextPackage) throw new Error("Context package not found for project");
+  if (input.taskId && contextPackage.taskId && contextPackage.taskId !== input.taskId) throw new Error("Context package belongs to a different task");
+  const task = input.taskId ? (await db.select().from(tasks).where(and(eq(tasks.id, input.taskId), eq(tasks.projectId, input.projectId))).limit(1))[0] : undefined;
+  if (input.taskId && !task) throw new Error("Task not found for model run");
+  const [brief] = await db.select().from(projectBriefs).where(eq(projectBriefs.projectId, input.projectId)).limit(1);
+  return { project, task, contextPackage, brief };
+}
+
+export async function reserveAgentModelRunForProject(userId: number, input: { projectId: number; taskId?: number; contextPackageId: number; role: AgentModelRole; model: string; reservationAmount: number; inputSummary: string }) {
+  const { db, project } = await requireOwnedProject(userId, input.projectId);
+  const now = new Date();
+  await db.update(modelCostReservations).set({ status: "expired" }).where(and(eq(modelCostReservations.projectId, input.projectId), eq(modelCostReservations.status, "reserved"), lt(modelCostReservations.expiresAt, now)));
+  const context = await getAgentModelRunContextForProject(userId, { projectId: input.projectId, contextPackageId: input.contextPackageId, taskId: input.taskId });
+  if (input.role === "debugger") {
+    if (!input.taskId) throw new Error("Debugger requires a task");
+    const [attempts] = await db.select({ count: sql<number>`count(*)` }).from(agentModelRuns).where(and(eq(agentModelRuns.projectId, input.projectId), eq(agentModelRuns.taskId, input.taskId), eq(agentModelRuns.role, "debugger"), inArray(agentModelRuns.status, ["reserved", "running", "completed", "failed"])));
+    if (Number(attempts?.count ?? 0) >= modelRolePolicies.debugger.maxAttempts) throw new Error("Debugger attempt limit reached; owner intervention is required");
+  }
+  const [spentSummary, reservedSummary] = await Promise.all([
+    db.select({ amount: sql<string>`coalesce(sum(${costEntries.amount}), 0)` }).from(costEntries).where(eq(costEntries.projectId, input.projectId)),
+    db.select({ amount: sql<string>`coalesce(sum(${modelCostReservations.reservedAmount}), 0)` }).from(modelCostReservations).where(and(eq(modelCostReservations.projectId, input.projectId), eq(modelCostReservations.status, "reserved"))),
+  ]);
+  const committed = Number(spentSummary[0]?.amount ?? 0) + Number(reservedSummary[0]?.amount ?? 0);
+  const budget = Number(project.budgetLimit);
+  if (committed + input.reservationAmount > budget) throw new Error("Model reservation exceeds the project budget");
+  const [reservationResult] = await db.insert(modelCostReservations).values({ projectId: input.projectId, taskId: input.taskId ?? null, role: input.role, model: input.model, reservedAmount: String(input.reservationAmount), expiresAt: new Date(now.getTime() + 10 * 60 * 1000) });
+  const reservationId = Number(reservationResult.insertId);
+  const [agent] = await db.select({ id: agents.id }).from(agents).where(and(eq(agents.projectId, input.projectId), eq(agents.key, input.role))).limit(1);
+  const [runResult] = await db.insert(agentModelRuns).values({ projectId: input.projectId, taskId: input.taskId ?? null, contextPackageId: context.contextPackage.id, agentId: agent?.id ?? null, reservationId, role: input.role, model: input.model, inputSummary: input.inputSummary, status: "reserved" });
+  const runId = Number(runResult.insertId);
+  await recordExecutionEvent(userId, input.projectId, { taskId: input.taskId, actor: `Model Gateway · ${input.role}`, type: "MODEL_COST_RESERVED", label: "تم حجز تكلفة نموذج", detail: `${input.model}: $${input.reservationAmount.toFixed(4)} قبل الإرسال.` });
+  return { reservation: (await db.select().from(modelCostReservations).where(eq(modelCostReservations.id, reservationId)).limit(1))[0], run: (await db.select().from(agentModelRuns).where(eq(agentModelRuns.id, runId)).limit(1))[0], context };
+}
+
+export async function markAgentModelRunRunning(userId: number, input: { projectId: number; runId: number }) {
+  const { db } = await requireOwnedProject(userId, input.projectId);
+  const [run] = await db.select().from(agentModelRuns).where(and(eq(agentModelRuns.id, input.runId), eq(agentModelRuns.projectId, input.projectId))).limit(1);
+  if (!run || run.status !== "reserved") throw new Error("Model run is not available to start");
+  await db.update(agentModelRuns).set({ status: "running", startedAt: new Date() }).where(eq(agentModelRuns.id, run.id));
+  return (await db.select().from(agentModelRuns).where(eq(agentModelRuns.id, run.id)).limit(1))[0];
+}
+
+export async function settleAgentModelRunForProject(userId: number, input: { projectId: number; runId: number; outputJson: string; outputSummary: string; inputTokens: number; outputTokens: number; durationMs: number }) {
+  const { db } = await requireOwnedProject(userId, input.projectId);
+  const [run] = await db.select().from(agentModelRuns).where(and(eq(agentModelRuns.id, input.runId), eq(agentModelRuns.projectId, input.projectId))).limit(1);
+  if (!run || !["reserved", "running"].includes(run.status)) throw new Error("Model run cannot be settled");
+  const [reservation] = await db.select().from(modelCostReservations).where(eq(modelCostReservations.id, run.reservationId)).limit(1);
+  if (!reservation || reservation.status !== "reserved") throw new Error("Model reservation is not active");
+  const amount = Number(reservation.reservedAmount);
+  await db.update(agentModelRuns).set({ status: "completed", outputJson: input.outputJson, outputSummary: input.outputSummary, completedAt: new Date() }).where(eq(agentModelRuns.id, run.id));
+  await db.update(modelCostReservations).set({ status: "settled", settledAt: new Date() }).where(eq(modelCostReservations.id, reservation.id));
+  await db.insert(costEntries).values({ projectId: input.projectId, taskId: run.taskId, agentId: run.agentId, model: run.model, inputTokens: input.inputTokens, outputTokens: input.outputTokens, durationMs: input.durationMs, amount: String(amount) });
+  await db.insert(modelUsage).values({ projectId: input.projectId, taskId: run.taskId, model: run.model, inputTokens: input.inputTokens, outputTokens: input.outputTokens, durationMs: input.durationMs, amount: String(amount) });
+  await recordExecutionEvent(userId, input.projectId, { taskId: run.taskId ?? undefined, actor: `Model Gateway · ${run.role}`, type: "MODEL_RUN_COMPLETED", label: "اكتمل تشغيل نموذج", detail: `${run.model}: سُوّي الحجز $${amount.toFixed(4)}.` });
+  return (await db.select().from(agentModelRuns).where(eq(agentModelRuns.id, run.id)).limit(1))[0];
+}
+
+export async function failAgentModelRunForProject(userId: number, input: { projectId: number; runId: number; errorSummary: string }) {
+  const { db } = await requireOwnedProject(userId, input.projectId);
+  const [run] = await db.select().from(agentModelRuns).where(and(eq(agentModelRuns.id, input.runId), eq(agentModelRuns.projectId, input.projectId))).limit(1);
+  if (!run || !["reserved", "running"].includes(run.status)) throw new Error("Model run cannot be released");
+  await db.update(agentModelRuns).set({ status: "failed", errorSummary: input.errorSummary.slice(0, 2000), completedAt: new Date() }).where(eq(agentModelRuns.id, run.id));
+  await db.update(modelCostReservations).set({ status: "released" }).where(and(eq(modelCostReservations.id, run.reservationId), eq(modelCostReservations.status, "reserved")));
+  await recordExecutionEvent(userId, input.projectId, { taskId: run.taskId ?? undefined, actor: `Model Gateway · ${run.role}`, type: "MODEL_RUN_FAILED", label: "فشل تشغيل نموذج", detail: "حُرر الحجز قبل تسويته؛ راجع السجل المختصر." });
+  return (await db.select().from(agentModelRuns).where(eq(agentModelRuns.id, run.id)).limit(1))[0];
 }
 
 export async function listProjectCommands(userId: number, projectId: number, limit = 50) {

@@ -37,6 +37,9 @@ export const criterionStatusValues = ["pending", "verified", "waived"] as const;
 export const contextPackageStatusValues = ["draft", "sealed"] as const;
 export const projectReportKindValues = ["delivery", "blocked"] as const;
 export const projectReportStatusValues = ["draft", "final"] as const;
+export const agentModelRoleValues = ["planner", "coder", "qa", "reviewer", "debugger"] as const;
+export const agentModelRunStatusValues = ["reserved", "running", "completed", "failed", "blocked", "cancelled"] as const;
+export const modelCostReservationStatusValues = ["reserved", "settled", "released", "expired"] as const;
 
 export const projects = mysqlTable("projects", {
   id: int("id").autoincrement().primaryKey(),
@@ -503,6 +506,46 @@ export const modelUsage = mysqlTable("model_usage", {
   createdAt: timestamp("created_at").defaultNow().notNull(),
 }, (table) => [
   index("model_usage_project_created_idx").on(table.projectId, table.createdAt),
+]);
+
+export const modelCostReservations = mysqlTable("model_cost_reservations", {
+  id: int("id").autoincrement().primaryKey(),
+  projectId: int("project_id").notNull().references(() => projects.id, { onDelete: "cascade" }),
+  taskId: int("task_id").references(() => tasks.id, { onDelete: "set null" }),
+  role: mysqlEnum("role", agentModelRoleValues).notNull(),
+  model: varchar("model", { length: 128 }).notNull(),
+  reservedAmount: decimal("reserved_amount", { precision: 12, scale: 4 }).notNull(),
+  status: mysqlEnum("status", modelCostReservationStatusValues).default("reserved").notNull(),
+  expiresAt: timestamp("expires_at").notNull(),
+  settledAt: timestamp("settled_at"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+}, (table) => [
+  index("model_cost_reservations_project_status_idx").on(table.projectId, table.status),
+  index("model_cost_reservations_expires_idx").on(table.expiresAt),
+]);
+
+export const agentModelRuns = mysqlTable("agent_model_runs", {
+  id: int("id").autoincrement().primaryKey(),
+  projectId: int("project_id").notNull().references(() => projects.id, { onDelete: "cascade" }),
+  taskId: int("task_id").references(() => tasks.id, { onDelete: "set null" }),
+  contextPackageId: int("context_package_id").notNull().references(() => contextPackages.id, { onDelete: "restrict" }),
+  agentId: int("agent_id").references(() => agents.id, { onDelete: "set null" }),
+  reservationId: int("reservation_id").notNull().references(() => modelCostReservations.id, { onDelete: "restrict" }),
+  role: mysqlEnum("role", agentModelRoleValues).notNull(),
+  model: varchar("model", { length: 128 }).notNull(),
+  status: mysqlEnum("status", agentModelRunStatusValues).default("reserved").notNull(),
+  inputSummary: text("input_summary").notNull(),
+  outputJson: text("output_json"),
+  outputSummary: text("output_summary"),
+  errorSummary: text("error_summary"),
+  attemptNumber: int("attempt_number").default(1).notNull(),
+  startedAt: timestamp("started_at"),
+  completedAt: timestamp("completed_at"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+}, (table) => [
+  index("agent_model_runs_project_created_idx").on(table.projectId, table.createdAt),
+  index("agent_model_runs_task_role_created_idx").on(table.taskId, table.role, table.createdAt),
+  index("agent_model_runs_context_idx").on(table.contextPackageId),
 ]);
 
 export type User = typeof users.$inferSelect;

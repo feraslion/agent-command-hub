@@ -127,6 +127,13 @@
       "when": 1787248630680,
       "tag": "0017_equal_shotgun",
       "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "5",
+      "when": 1787249678036,
+      "tag": "0018_whole_warpath",
+      "breakpoints": true
     }
   ]
 }

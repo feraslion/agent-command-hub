@@ -6,6 +6,8 @@ import { protectedProcedure, publicProcedure, router } from "./_core/trpc";
 import * as db from "./db";
 import { getDryWorkerLoopStatus } from "./dry-worker";
 import { composeAgentSystemPrompt, promptTemplateKeyValues, promptTemplateLibrary, promptTemplateLocaleValues } from "./prompt-library";
+import { runGovernedAgentRole } from "./agent-model-service";
+import { agentModelRoles } from "../lib/agent-model-policy";
 
 const projectIdInput = z.object({ projectId: z.number().int().positive() });
 const taskStatus = z.enum(["pending", "queued", "running", "verifying", "completed", "failed", "debugging", "retrying", "cancelled"]);
@@ -99,6 +101,14 @@ export const appRouter = router({
     })).mutation(({ ctx, input }) => db.createContextPackageForProject(ctx.user.id, input)),
     reports: protectedProcedure.input(projectIdInput).query(({ ctx, input }) => db.listProjectReportsForOwner(ctx.user.id, input.projectId)),
     createReport: protectedProcedure.input(projectIdInput.extend({ kind: z.enum(["delivery", "blocked"]), finalize: z.boolean().optional() })).mutation(({ ctx, input }) => db.createProjectReportForOwner(ctx.user.id, input)),
+  }),
+  agentModel: router({
+    listRuns: protectedProcedure.input(projectIdInput.extend({ limit: z.number().int().min(1).max(100).optional() })).query(({ ctx, input }) => db.listAgentModelRunsForProject(ctx.user.id, input.projectId, input.limit ?? 50)),
+    run: protectedProcedure.input(projectIdInput.extend({
+      taskId: z.number().int().positive().optional(),
+      contextPackageId: z.number().int().positive(),
+      role: z.enum(agentModelRoles),
+    })).mutation(({ ctx, input }) => runGovernedAgentRole(ctx.user.id, input)),
   }),
   agents: router({
     list: protectedProcedure.input(projectIdInput).query(({ ctx, input }) => db.listProjectAgents(ctx.user.id, input.projectId)),

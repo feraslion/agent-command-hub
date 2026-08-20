@@ -46,6 +46,15 @@ chmod 600 runner/device/.env.runner
 
 يفحص الأمر تمهيدياً توفر عميل Docker، ووصوله إلى Docker Engine، ووجود صورتي `node:22-alpine` و`agenthub-runner-ts:5.7.3`. إذا غابت الصورة الأولى، نفذ `docker pull node:22-alpine`؛ وإذا غابت الثانية، نفذ `./runner/device/build-typescript-image.sh`. يمنع Runner الاتصال بالخادم أو تنفيذ طلبات عند فشل هذا الفحص.
 
+عند غياب Docker أو توقف الخدمة، يتعرف Runner إلى نظام التشغيل ويقترح إجراء مناسباً بدلاً من رسالة عامة:
+
+| النظام | الإجراء الذي ستقترحه الرسالة | المرجع الرسمي |
+| --- | --- | --- |
+| macOS | `brew install --cask docker` ثم `open -a Docker`. | [Docker Desktop for Mac](https://docs.docker.com/desktop/setup/install/mac-install/) |
+| Windows | في PowerShell بصلاحية مسؤول: `winget install -e --id Docker.DockerDesktop`. | [Docker Desktop for Windows](https://docs.docker.com/desktop/setup/install/windows-install/) |
+| Debian / Ubuntu | `sudo apt-get update && sudo apt-get install -y docker.io` ثم `sudo systemctl enable --now docker`. | [Docker Engine for Ubuntu](https://docs.docker.com/engine/install/ubuntu/) |
+| Fedora أو Arch أو توزيع آخر | يستخدم `dnf` أو `pacman` عند التعرف إلى التوزيع، أو يعرض رابط دليل Linux العام. | [Docker Engine for Linux](https://docs.docker.com/engine/install/) |
+
 ## 4. تشغيل Runner المرتبط
 
 بعد إكمال ملف الإعداد، شغل Runner:

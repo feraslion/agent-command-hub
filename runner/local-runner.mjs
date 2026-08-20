@@ -8,11 +8,12 @@
  * It never mounts a user directory, sends host environment variables, or
  * accepts the image/command from the server.
  */
-import { chmod, mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
+import { dockerRecoveryGuide } from "./docker-support.mjs";
 
 const NODE_IMAGE = "node:22-alpine";
 const TYPESCRIPT_IMAGE = "agenthub-runner-ts:5.7.3";
@@ -80,10 +81,22 @@ function run(command, args, options = {}) {
   });
 }
 
+async function hostPlatform() {
+  if (process.platform !== "linux") return { platform: process.platform };
+  try {
+    const osRelease = await readFile("/etc/os-release", "utf8");
+    const linuxId = osRelease.match(/^ID=(?:"?)([A-Za-z0-9_-]+)(?:"?)$/mu)?.[1]?.toLowerCase() ?? "";
+    return { platform: process.platform, linuxId };
+  } catch {
+    return { platform: process.platform, linuxId: "" };
+  }
+}
+
 async function assertDockerReady() {
+  const recovery = dockerRecoveryGuide(await hostPlatform());
   const daemon = await run("docker", ["info", "--format", "{{.Server.Version}}"]);
   if (daemon.code !== 0 || !daemon.stdout.trim()) {
-    throw new Error(`Docker preflight failed: the Docker daemon is unavailable. Start Docker Desktop or Docker Engine, then retry.${daemon.stderr ? ` ${daemon.stderr.trim()}` : ""}`);
+    throw new Error(`Docker preflight failed: the Docker daemon is unavailable. ${recovery}${daemon.stderr ? ` Docker reported: ${daemon.stderr.trim()}` : ""}`);
   }
 
   for (const image of [NODE_IMAGE, TYPESCRIPT_IMAGE]) {

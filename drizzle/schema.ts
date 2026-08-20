@@ -29,7 +29,8 @@ export const sandboxCheckKindValues = ["workspace_policy", "logical_test", "git_
 export const sandboxCheckStatusValues = ["passed", "blocked", "awaiting_approval", "rejected"] as const;
 export const isolatedRuntimeRequestStatusValues = ["environment_required", "blocked", "approved", "submitted", "completed", "failed"] as const;
 export const sensitiveWorkspaceChangeStatusValues = ["pending_secondary", "applied", "rejected", "conflicted"] as const;
-export const promptTemplateKeyValues = ["planner", "coder", "qa"] as const;
+export const promptTemplateKeyValues = ["planner", "coder", "qa", "debugger"] as const;
+export const promptTemplateLocaleValues = ["ar", "en"] as const;
 
 export const projects = mysqlTable("projects", {
   id: int("id").autoincrement().primaryKey(),
@@ -70,6 +71,7 @@ export const agentPromptAssignments = mysqlTable("agent_prompt_assignments", {
   ownerId: int("owner_id").notNull().references(() => users.id, { onDelete: "cascade" }),
   agentKey: varchar("agent_key", { length: 64 }).notNull(),
   templateKey: mysqlEnum("template_key", promptTemplateKeyValues).notNull(),
+  templateLocale: mysqlEnum("template_locale", promptTemplateLocaleValues).default("ar").notNull(),
   customInstructions: text("custom_instructions").notNull(),
   updatedAt: timestamp("updated_at").defaultNow().onUpdateNow().notNull(),
 }, (table) => [

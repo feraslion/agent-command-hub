@@ -12,6 +12,8 @@ import {
   projects,
   sandboxChecks,
   sensitiveWorkspaceChanges,
+  type promptTemplateKeyValues,
+  type promptTemplateLocaleValues,
   taskStatusValues,
   taskEngineRuns,
   taskEngineSteps,
@@ -701,16 +703,17 @@ export async function listAgentPromptAssignmentsForOwner(userId: number) {
   return db.select().from(agentPromptAssignments).where(eq(agentPromptAssignments.ownerId, userId)).orderBy(desc(agentPromptAssignments.updatedAt));
 }
 
-export async function upsertAgentPromptAssignmentForOwner(userId: number, input: { agentKey: string; templateKey: "planner" | "coder" | "qa"; customInstructions: string }) {
+export async function upsertAgentPromptAssignmentForOwner(userId: number, input: { agentKey: string; templateKey: (typeof promptTemplateKeyValues)[number]; templateLocale: (typeof promptTemplateLocaleValues)[number]; customInstructions: string }) {
   const db = await getDb();
   if (!db) throw new Error("Database not available");
   await db.insert(agentPromptAssignments).values({
     ownerId: userId,
     agentKey: input.agentKey,
     templateKey: input.templateKey,
+    templateLocale: input.templateLocale,
     customInstructions: input.customInstructions,
   }).onDuplicateKeyUpdate({
-    set: { templateKey: input.templateKey, customInstructions: input.customInstructions },
+    set: { templateKey: input.templateKey, templateLocale: input.templateLocale, customInstructions: input.customInstructions },
   });
   return (await db.select().from(agentPromptAssignments).where(and(eq(agentPromptAssignments.ownerId, userId), eq(agentPromptAssignments.agentKey, input.agentKey))).limit(1))[0];
 }

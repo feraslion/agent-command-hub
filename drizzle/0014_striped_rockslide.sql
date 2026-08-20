@@ -1,0 +1,2 @@
+ALTER TABLE `agent_prompt_assignments` MODIFY COLUMN `template_key` enum('planner','coder','qa','debugger') NOT NULL;--> statement-breakpoint
+ALTER TABLE `agent_prompt_assignments` ADD `template_locale` enum('ar','en') DEFAULT 'ar' NOT NULL;

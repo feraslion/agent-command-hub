@@ -159,4 +159,40 @@ describe("platform API security", () => {
 
     await expect(caller.agentPrompts.save({ agentKey: "Planner Agent", templateKey: "planner", customInstructions: "" })).rejects.toMatchObject({ code: "BAD_REQUEST" });
   });
+
+  it("يركب معاينة قالب Debugger الإنجليزي مع التعليمات المخصصة من دون كتابة في قاعدة البيانات", async () => {
+    const caller = appRouter.createCaller(contextWithUser({
+      id: 1,
+      openId: "owner",
+      email: "owner@example.com",
+      name: "Owner",
+      loginMethod: "manus",
+      role: "admin",
+      createdAt: new Date(),
+      updatedAt: new Date(),
+      lastSignedIn: new Date(),
+    }));
+
+    const preview = await caller.agentPrompts.preview({ templateKey: "debugger", templateLocale: "en", customInstructions: "Prioritize the smallest safe isolation step." });
+
+    expect(preview.finalPrompt).toContain("You are the Debugger in Agent Command Hub.");
+    expect(preview.finalPrompt).toContain("Prioritize the smallest safe isolation step.");
+    expect(preview.finalPrompt).toContain("Saved custom instructions");
+  });
+
+  it("يرفض لغة قالب غير مدعومة قبل تركيب معاينة النص النهائي", async () => {
+    const caller = appRouter.createCaller(contextWithUser({
+      id: 1,
+      openId: "owner",
+      email: "owner@example.com",
+      name: "Owner",
+      loginMethod: "manus",
+      role: "admin",
+      createdAt: new Date(),
+      updatedAt: new Date(),
+      lastSignedIn: new Date(),
+    }));
+
+    await expect(caller.agentPrompts.preview({ templateKey: "debugger", templateLocale: "fr" as never, customInstructions: "" })).rejects.toMatchObject({ code: "BAD_REQUEST" });
+  });
 });

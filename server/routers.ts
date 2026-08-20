@@ -5,7 +5,7 @@ import { systemRouter } from "./_core/systemRouter";
 import { protectedProcedure, publicProcedure, router } from "./_core/trpc";
 import * as db from "./db";
 import { getDryWorkerLoopStatus } from "./dry-worker";
-import { promptTemplateLibrary } from "./prompt-library";
+import { composeAgentSystemPrompt, promptTemplateKeyValues, promptTemplateLibrary, promptTemplateLocaleValues } from "./prompt-library";
 
 const projectIdInput = z.object({ projectId: z.number().int().positive() });
 const taskStatus = z.enum(["pending", "queued", "running", "verifying", "completed", "failed", "debugging", "retrying", "cancelled"]);
@@ -69,9 +69,15 @@ export const appRouter = router({
   agentPrompts: router({
     library: protectedProcedure.query(() => promptTemplateLibrary),
     list: protectedProcedure.query(({ ctx }) => db.listAgentPromptAssignmentsForOwner(ctx.user.id)),
+    preview: protectedProcedure.input(z.object({
+      templateKey: z.enum(promptTemplateKeyValues),
+      templateLocale: z.enum(promptTemplateLocaleValues),
+      customInstructions: z.string().trim().max(4000),
+    })).query(({ input }) => ({ finalPrompt: composeAgentSystemPrompt(input) })),
     save: protectedProcedure.input(z.object({
       agentKey: z.string().trim().min(2).max(64).regex(/^[a-z0-9_-]+$/),
-      templateKey: z.enum(["planner", "coder", "qa"]),
+      templateKey: z.enum(promptTemplateKeyValues),
+      templateLocale: z.enum(promptTemplateLocaleValues).default("ar"),
       customInstructions: z.string().trim().max(4000),
     })).mutation(({ ctx, input }) => db.upsertAgentPromptAssignmentForOwner(ctx.user.id, input)),
   }),

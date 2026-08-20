@@ -99,6 +99,13 @@
       "when": 1787168003687,
       "tag": "0013_eager_psylocke",
       "breakpoints": true
+    },
+    {
+      "idx": 14,
+      "version": "5",
+      "when": 1787199629625,
+      "tag": "0014_striped_rockslide",
+      "breakpoints": true
     }
   ]
 }

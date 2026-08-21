@@ -300,6 +300,6 @@
 - [x] استعادة ملف سياسة CORS واختباراته بعد تعارض المزامنة والتحقق من البناء.
 - [x] استبدال أصول الأيقونات الكبيرة بنسخ PNG مصغرة قابلة للحفظ والنشر.
 - [x] إضافة Docker Compose محلي مقيد لتشغيل Runner والتحقق من heartbeat والتنفيذ على جهاز المالك.
-- [ ] رفع إعداد Docker Compose للـRunner إلى GitHub عبر Pull Request محمي.
+- [x] رفع إعداد Docker Compose للـRunner إلى GitHub عبر Pull Request محمي.
 - [ ] إعادة أساس فرق Docker Compose على أحدث main في GitHub قبل إنشاء طلب السحب.
 - [ ] إعداد توقيع Android إنتاجي عبر keystore محفوظ في أسرار آمنة قبل أي توزيع خارجي.

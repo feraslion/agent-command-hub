@@ -4,6 +4,7 @@ import { createServer } from "http";
 import net from "net";
 import { createExpressMiddleware } from "@trpc/server/adapters/express";
 import { registerOAuthRoutes } from "./oauth";
+import { isAllowedCorsOrigin } from "./cors";
 import { registerStorageProxy } from "./storageProxy";
 import { appRouter } from "../routers";
 import { createContext } from "./context";
@@ -35,22 +36,28 @@ async function startServer() {
   const server = createServer(app);
   registerRuntimeRealtime(server);
 
-  // Enable CORS for all routes - reflect the request origin to support credentials
+  // Allow credentialed CORS only from explicitly configured application origins.
+  // Requests without Origin (Runner, health checks, same-origin calls) still reach their route.
   app.use((req, res, next) => {
     const origin = req.headers.origin;
-    if (origin) {
+    const allowedOrigin = isAllowedCorsOrigin(origin);
+    if (origin && allowedOrigin) {
       res.header("Access-Control-Allow-Origin", origin);
+      res.vary("Origin");
+      res.header("Access-Control-Allow-Credentials", "true");
     }
     res.header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
     res.header(
       "Access-Control-Allow-Headers",
       "Origin, X-Requested-With, Content-Type, Accept, Authorization",
     );
-    res.header("Access-Control-Allow-Credentials", "true");
-
     // Handle preflight requests
     if (req.method === "OPTIONS") {
-      res.sendStatus(200);
+      if (origin && !allowedOrigin) {
+        res.status(403).json({ error: "CORS origin is not allowed" });
+        return;
+      }
+      res.sendStatus(204);
       return;
     }
     next();

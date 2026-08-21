@@ -11,6 +11,8 @@
 | `docker-compose.runner.yml` | تعريف Compose محلي مقيد لتشغيل Runner باستمرار على جهاز المالك. |
 | `run-compose-runner.sh` | غلاف Compose ينشئ مساحة عمل محلية مؤقتة ولا يطبع إعداد الإقران. |
 | `verify-compose-runner.sh` | يتحقق من الإعداد ثم يجري نبضة أو يطلب تنفيذاً واحداً معتمداً. |
+| `watch-runner-heartbeat.sh` | حلقة داخل الحاوية ترسل نبضة فقط كل 60 ثانية ولا تطلب أي عمل. |
+| `manage-runner-monitor.sh` | يشغّل أو يوقف أو يعرض سجل مراقب النبض الاختياري. |
 
 ## المتطلبات
 
@@ -121,6 +123,33 @@ chmod 600 runner/device/.env.runner
 
 ```bash
 ./runner/device/run-compose-runner.sh down
+```
+
+## 5.2 مراقبة اتصال Runner دورياً بلا تنفيذ
+
+يشغل المراقب الاختياري حاوية مستقلة كل نبضة من دون استدعاء `/claim` أو تنفيذ شيفرة أو حجز مهمة. يتحقق قبل كل نبضة من Docker والصورة المقيدة، ثم يرسل heartbeat فقط كل 60 ثانية. لا يظهر المفتاح أو الرمز في السجل.
+
+```bash
+./runner/device/manage-runner-monitor.sh start
+./runner/device/manage-runner-monitor.sh logs
+```
+
+لاختبار نبضة واحدة من دون تشغيل المراقبة المستمرة:
+
+```bash
+./runner/device/manage-runner-monitor.sh once
+```
+
+يمكن تغيير الفترة محلياً إلى قيمة بين 15 و3600 ثانية من دون إضافتها إلى Git:
+
+```bash
+AGENTHUB_HEARTBEAT_INTERVAL_SECONDS=120 ./runner/device/manage-runner-monitor.sh start
+```
+
+لإيقاف المراقب:
+
+```bash
+./runner/device/manage-runner-monitor.sh stop
 ```
 
 ## 6. فحص مستودع محلي قبل التخطيط

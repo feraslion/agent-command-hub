@@ -118,6 +118,26 @@ describe("local Runner E2E process", () => {
     } finally { await new Promise<void>((resolve) => server.close(() => resolve())); }
   });
 
+  it("heartbeat-only mode reports readiness without claiming or executing any Runtime request", async () => {
+    const calls: string[] = [];
+    const server = createServer(async (request, response) => {
+      await readBody(request);
+      calls.push(request.url ?? "");
+      if (request.url === "/api/local-runner/heartbeat") return reply(response, 200, { runner: { runnerKey: "runner-1234abcdef56", status: "ready" } });
+      return reply(response, 500, { error: "heartbeat-only mode must not call this endpoint" });
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const docker = createDockerMock();
+    try {
+      const port = (server.address() as { port: number }).port;
+      const result = await runRunner([...runnerArguments(`http://127.0.0.1:${port}`), "--heartbeat-only"], { PATH: `${docker.directory}:${process.env.PATH ?? ""}`, RUNNER_E2E_DOCKER_LOG: docker.logPath });
+      expect(result.code).toBe(0);
+      expect(result.stdout).toContain("heartbeat reported");
+      expect(calls).toEqual(["/api/local-runner/heartbeat"]);
+      expect(readFileSync(docker.logPath, "utf8")).not.toContain("run --rm");
+    } finally { await new Promise<void>((resolve) => server.close(() => resolve())); }
+  });
+
   it("accepts a TypeScript multi-file bundle with a relative import and uses the pinned image", async () => {
     let report: Record<string, unknown> | undefined;
     const server = createServer(async (request, response) => {

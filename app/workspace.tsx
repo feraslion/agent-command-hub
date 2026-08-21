@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { FlatList, Pressable, StyleSheet, Text, TextInput, View } from "react-native";
+import { Alert, FlatList, Pressable, StyleSheet, Text, TextInput, View } from "react-native";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import { ScreenContainer } from "@/components/screen-container";
 import { useColors } from "@/hooks/use-colors";
@@ -11,6 +11,7 @@ import { applySavedMultiFileTemplate, hasValidManualMultiFileBundle, isEligibleM
 
 type WorkspaceFile = { id: number; path: string; version: number; createdAt: Date; updatedAt: Date };
 type EditorMode = "preview" | "edit" | "diff";
+type BundleTemplate = { id: number; name: string; entryPath: string; paths: string[] };
 
 export default function WorkspaceBrowserScreen() {
   const router = useRouter();
@@ -22,10 +23,18 @@ export default function WorkspaceBrowserScreen() {
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
   const [selectedBundlePaths, setSelectedBundlePaths] = useState<string[]>([]);
   const [templateName, setTemplateName] = useState("");
+  const [editingTemplateId, setEditingTemplateId] = useState<number | null>(null);
+  const [editingTemplateName, setEditingTemplateName] = useState("");
   const [draft, setDraft] = useState("");
   const [editorMode, setEditorMode] = useState<EditorMode>("preview");
   const utils = trpc.useUtils();
-  const ensureWorkspace = trpc.workspace.ensure.useMutation({ onSuccess: () => { utils.workspace.files.invalidate({ projectId }); utils.workspace.get.invalidate({ projectId }); } });
+
+  const ensureWorkspace = trpc.workspace.ensure.useMutation({
+    onSuccess: () => {
+      utils.workspace.files.invalidate({ projectId });
+      utils.workspace.get.invalidate({ projectId });
+    },
+  });
   const ensureWorkspaceMutate = ensureWorkspace.mutate;
   const filesQuery = trpc.workspace.files.useQuery({ projectId, limit: 100 }, { enabled: isValidProject, refetchInterval: 8_000 });
   const fileQuery = trpc.workspace.readFile.useQuery({ projectId, path: selectedPath ?? "source/placeholder" }, { enabled: isValidProject && Boolean(selectedPath) });
@@ -37,13 +46,38 @@ export default function WorkspaceBrowserScreen() {
     },
   });
   const sensitiveChanges = trpc.sensitiveChanges.list.useQuery({ projectId, limit: 50 }, { enabled: isValidProject, refetchInterval: 8_000 });
-  const submitSensitiveChange = trpc.sensitiveChanges.submit.useMutation({ onSuccess: () => { utils.sensitiveChanges.list.invalidate({ projectId }); setEditorMode("preview"); } });
+  const submitSensitiveChange = trpc.sensitiveChanges.submit.useMutation({
+    onSuccess: () => {
+      utils.sensitiveChanges.list.invalidate({ projectId });
+      setEditorMode("preview");
+    },
+  });
   const runtimeStatus = trpc.isolatedRuntime.status.useQuery();
   const runtimeRequests = trpc.isolatedRuntime.listRequests.useQuery({ projectId, limit: 1 }, { enabled: isValidProject, refetchInterval: 8_000 });
   const requestExecution = trpc.isolatedRuntime.requestExecution.useMutation({ onSuccess: () => runtimeRequests.refetch() });
   const requestMultiFileExecution = trpc.isolatedRuntime.requestMultiFileExecution.useMutation({ onSuccess: () => runtimeRequests.refetch() });
   const bundleTemplates = trpc.isolatedRuntime.listMultiFileTemplates.useQuery({ projectId }, { enabled: isValidProject, refetchInterval: 15_000 });
-  const saveBundleTemplate = trpc.isolatedRuntime.saveMultiFileTemplate.useMutation({ onSuccess: () => { bundleTemplates.refetch(); setTemplateName(""); } });
+  const saveBundleTemplate = trpc.isolatedRuntime.saveMultiFileTemplate.useMutation({
+    onSuccess: () => {
+      bundleTemplates.refetch();
+      setTemplateName("");
+    },
+  });
+  const renameBundleTemplate = trpc.isolatedRuntime.renameMultiFileTemplate.useMutation({
+    onSuccess: () => {
+      bundleTemplates.refetch();
+      setEditingTemplateId(null);
+      setEditingTemplateName("");
+    },
+  });
+  const deleteBundleTemplate = trpc.isolatedRuntime.deleteMultiFileTemplate.useMutation({
+    onSuccess: () => {
+      bundleTemplates.refetch();
+      setEditingTemplateId(null);
+      setEditingTemplateName("");
+    },
+  });
+
   const files = useMemo(() => filesQuery.data ?? [], [filesQuery.data]);
   const selectedFile = fileQuery.data;
   const selectedFileContent = selectedFile?.content;
@@ -56,52 +90,362 @@ export default function WorkspaceBrowserScreen() {
   const directories = useMemo(() => ["source/", "docs/", "tests/", "artifacts/", "memory/", "logs/"], []);
   const eligibleMultiFilePaths = useMemo(() => files.filter((file) => isEligibleMultiFilePath(file.path)).map((file) => file.path), [files]);
   const hasMultiFileEntry = hasValidManualMultiFileBundle(selectedPath, selectedBundlePaths);
+  const latestRuntimeRequest = runtimeRequests.data?.[0];
 
-  useEffect(() => { if (isValidProject) ensureWorkspaceMutate({ projectId }); }, [ensureWorkspaceMutate, isValidProject, projectId]);
-  useEffect(() => { if (selectedFileContent !== undefined) setDraft(selectedFileContent); }, [selectedFileContent, selectedFileVersion]);
-  useEffect(() => { setSelectedBundlePaths((current) => current.filter((path) => eligibleMultiFilePaths.includes(path))); }, [eligibleMultiFilePaths]);
+  useEffect(() => {
+    if (isValidProject) ensureWorkspaceMutate({ projectId });
+  }, [ensureWorkspaceMutate, isValidProject, projectId]);
+  useEffect(() => {
+    if (selectedFileContent !== undefined) setDraft(selectedFileContent);
+  }, [selectedFileContent, selectedFileVersion]);
+  useEffect(() => {
+    setSelectedBundlePaths((current) => current.filter((path) => eligibleMultiFilePaths.includes(path)));
+  }, [eligibleMultiFilePaths]);
 
-  const chooseFile = (path: string) => { setSelectedPath(path); setEditorMode("preview"); };
-  const applyBundleTemplate = (template: { entryPath: string; paths: string[] }) => {
+  const chooseFile = (path: string) => {
+    setSelectedPath(path);
+    setEditorMode("preview");
+  };
+  const applyBundleTemplate = (template: BundleTemplate) => {
     const applied = applySavedMultiFileTemplate(template, eligibleMultiFilePaths);
     setSelectedBundlePaths(applied.paths);
     if (applied.entryPath) chooseFile(applied.entryPath);
   };
-  const latestRuntimeRequest = runtimeRequests.data?.[0];
+  const confirmDeleteTemplate = (template: Pick<BundleTemplate, "id" | "name">) => {
+    Alert.alert(
+      "حذف قالب الحزمة؟",
+      `سيُحذف قالب «${template.name}» فقط. لن تُحذف أي ملفات من Workspace ولن تتأثر طلبات التنفيذ السابقة.`,
+      [
+        { text: "إلغاء", style: "cancel" },
+        { text: "حذف القالب", style: "destructive", onPress: () => deleteBundleTemplate.mutate({ projectId, templateId: template.id }) },
+      ],
+    );
+  };
 
-  return <ScreenContainer className="px-5" containerClassName="bg-background"><FlatList<WorkspaceFile>
-    data={files}
-    keyExtractor={(item) => String(item.id)}
-    contentContainerStyle={styles.list}
-    renderItem={({ item }) => { const eligible = isEligibleMultiFilePath(item.path); const included = selectedBundlePaths.includes(item.path); return <View style={[styles.fileRow, { backgroundColor: colors.surface, borderColor: selectedPath === item.path ? colors.primary : colors.border }]}><Pressable onPress={() => chooseFile(item.path)} accessibilityRole="button" accessibilityLabel={`فتح الملف ${item.path}`} style={({ pressed }) => [styles.fileOpenArea, pressed && styles.pressed]}><View style={styles.fileMeta}><Text style={[styles.fileVersion, { color: colors.primary }]}>v{item.version}</Text><Text style={[styles.fileDate, { color: colors.muted }]}>{formatDate(item.updatedAt)}</Text></View><View style={styles.fileName}><Text style={[styles.path, { color: colors.foreground }]}>{item.path}</Text><Text style={[styles.fileSub, { color: colors.muted }]}>{languageLabel(languageFromPath(item.path))} · ملف افتراضي محفوظ</Text></View></Pressable>{eligible ? <Pressable onPress={() => setSelectedBundlePaths((current) => toggleMultiFileSelection(current, item.path))} accessibilityRole="checkbox" accessibilityState={{ checked: included }} accessibilityLabel={`${included ? "إزالة" : "إضافة"} ${item.path} من حزمة TypeScript`} style={({ pressed }) => [styles.bundleToggle, { backgroundColor: included ? colors.primary : colors.subtle, borderColor: included ? colors.primary : colors.border }, pressed && styles.pressed]}><Text style={[styles.bundleToggleText, { color: included ? "#FFFFFF" : colors.primary }]}>{included ? "ضمن الحزمة" : "إضافة"}</Text></Pressable> : null}</View>; }}
-    ItemSeparatorComponent={() => <View style={styles.separator} />}
-    ListHeaderComponent={<WorkspaceHeader router={router} colors={colors} projectId={projectId} projectName={params.projectName ?? "المشروع"} directories={directories} />}
-    ListEmptyComponent={!filesQuery.isLoading ? <View style={[styles.empty, { backgroundColor: colors.surface, borderColor: colors.border }]}><Text style={[styles.emptyTitle, { color: colors.foreground }]}>{filesQuery.error ? "تعذر تحميل ملفات Workspace" : "لا توجد ملفات محفوظة بعد"}</Text><Text style={[styles.emptyText, { color: colors.muted }]}>{filesQuery.error ? "تحقق من الاتصال وصلاحية المشروع ثم أعد المحاولة." : "ستظهر هنا الملفات التي ينشئها Runtime أو تضيفها الأدوات المقيدة لاحقاً."}</Text></View> : null}
-    ListFooterComponent={selectedPath ? <View style={[styles.editorCard, { backgroundColor: colors.surface, borderColor: colors.border }]}>
-      <View style={styles.editorTitleRow}><View><Text style={[styles.previewTitle, { color: colors.foreground }]}>{selectedPath}</Text><Text style={[styles.previewCaption, { color: colors.muted }]}>{selectedFile ? `الإصدار ${selectedFile.version} · ${languageLabel(language)}` : "جارٍ قراءة الملف…"}</Text></View><View style={[styles.languagePill, { backgroundColor: colors.subtle }]}><Text style={[styles.languagePillText, { color: colors.primary }]}>{languageLabel(language)}</Text></View></View>
-      {selectedFile ? <EditorControls mode={editorMode} onMode={setEditorMode} hasChanges={diffSummary.changed} colors={colors} /> : null}
-      {selectedFile && editorMode === "edit" ? <View><TextInput value={draft} onChangeText={setDraft} multiline autoCapitalize="none" autoCorrect={false} spellCheck={false} textAlignVertical="top" style={[styles.input, { color: colors.foreground, backgroundColor: colors.subtle, borderColor: colors.border }]} /><Text style={[styles.highlightLabel, { color: colors.muted }]}>معاينة التمييز الرمزي للمسودة</Text><HighlightedCode content={draft} language={language} colors={colors} /></View> : null}
-      {selectedFile && editorMode === "preview" ? <HighlightedCode content={selectedFile.content} language={language} colors={colors} /> : null}
-      {selectedFile && editorMode === "diff" ? <DiffReview lines={diffLines} colors={colors} /> : null}
-      {selectedFile && editorMode !== "preview" ? <View><View style={styles.saveRow}><Text style={[styles.diffSummary, { color: colors.muted }]}>{diffSummary.changed ? `+${diffSummary.added} / −${diffSummary.removed} سطر` : "لا توجد تغييرات للحفظ"}</Text><Pressable disabled={!canPerformSensitiveActions || !diffSummary.changed || writeFile.isPending || submitSensitiveChange.isPending || Boolean(activeSensitiveChange)} onPress={() => sensitivity.sensitive ? submitSensitiveChange.mutate({ projectId, path: selectedPath, content: draft }) : writeFile.mutate({ projectId, path: selectedPath, content: draft })} accessibilityRole="button" accessibilityLabel="حفظ تعديل Workspace" style={({ pressed }) => [styles.saveButton, { backgroundColor: sensitivity.sensitive ? colors.warning : colors.primary }, (!canPerformSensitiveActions || !diffSummary.changed || writeFile.isPending || submitSensitiveChange.isPending || Boolean(activeSensitiveChange) || pressed) && styles.pressed]}><Text style={styles.saveButtonText}>{!canPerformSensitiveActions ? "يتطلب اتصالاً" : activeSensitiveChange ? "بانتظار المراجعة" : submitSensitiveChange.isPending ? "جارٍ إرسال المراجعة…" : writeFile.isPending ? "جارٍ الحفظ…" : sensitivity.sensitive ? "إرسال للمراجعة الثانوية" : "اعتماد وحفظ"}</Text></Pressable></View>{sensitivity.sensitive ? <View style={[styles.secondaryReview, { backgroundColor: "#4A3414", borderColor: "#765724" }]}><Text style={styles.secondaryTitle}>تعديل حساس — حفظ مباشر محجوب</Text><Text style={styles.secondaryCopy}>الإشارات: {sensitivity.reasons.join("، ")}. ستنشأ موافقة ثانوية قبل كتابة المسودة إلى الملف.</Text></View> : null}{activeSensitiveChange ? <Text style={[styles.reviewWaiting, { color: colors.warning }]}>يوجد اقتراح معلق لهذا الملف. افتح مركز التحكم لاتخاذ قرار المراجعة الثانوية.</Text> : null}</View> : null}
-      {writeFile.error || submitSensitiveChange.error ? <Text style={styles.errorText}>تعذر معالجة المسودة. لم يتغير الملف المحفوظ؛ راجع المسار أو الاتصال ثم أعد المحاولة.</Text> : null}
-      <View style={[styles.runtimeGate, { backgroundColor: colors.subtle, borderColor: colors.border }]}><Text style={[styles.runtimeTitle, { color: colors.foreground }]}>{runtimeStatus.data?.label ?? "حالة بيئة Runtime"}</Text><Text style={[styles.runtimeCopy, { color: colors.muted }]}>{latestRuntimeRequest ? runtimeRequestMessage(latestRuntimeRequest.status, latestRuntimeRequest.exitCode) : runtimeStatus.data?.detail ?? "جارٍ فحص حالة البيئة."}</Text><Pressable disabled={!canPerformSensitiveActions || !selectedFile || requestExecution.isPending || !runtimeStatus.data?.canExecuteUserCode} onPress={() => requestExecution.mutate({ projectId, targetPath: selectedPath })} style={({ pressed }) => [styles.runtimeButton, { backgroundColor: colors.primary }, (pressed || !canPerformSensitiveActions || requestExecution.isPending || !selectedFile || !runtimeStatus.data?.canExecuteUserCode) && styles.pressed]} accessibilityRole="button" accessibilityLabel="طلب تنفيذ معزول للملف المحدد"><Text style={styles.runtimeButtonText}>{requestExecution.isPending ? "جارٍ إنشاء طلب الموافقة…" : !canPerformSensitiveActions ? "يتطلب اتصالاً" : runtimeStatus.data?.canExecuteUserCode ? "طلب تنفيذ معزول" : "اربط Runner من الإعدادات"}</Text></Pressable><View style={[styles.bundleSummary, { borderColor: colors.border }]}><Text style={[styles.bundleSummaryTitle, { color: colors.foreground }]}>حزمة TypeScript يدوية</Text><Text style={[styles.runtimeCopy, { color: colors.muted }]}>{selectedBundlePaths.length ? `اخترت ${selectedBundlePaths.length} من أصل ${eligibleMultiFilePaths.length} ملفاً مؤهلاً.` : "اختر ملفين أو أكثر من أزرار «إضافة» بجانب الملفات المؤهلة."}</Text>{selectedPath && !selectedBundlePaths.includes(selectedPath) ? <Text style={[styles.bundleWarning, { color: colors.warning }]}>أضف الملف المفتوح ليكون ملف الدخول قبل طلب التنفيذ متعدد الملفات.</Text> : null}<View style={styles.templateSaveRow}><TextInput value={templateName} onChangeText={setTemplateName} placeholder="اسم القالب، مثال: اختبارات الوحدة" placeholderTextColor={colors.muted} maxLength={80} returnKeyType="done" style={[styles.templateInput, { color: colors.foreground, backgroundColor: colors.surface, borderColor: colors.border }]} /><Pressable disabled={!canPerformSensitiveActions || !hasMultiFileEntry || templateName.trim().length < 2 || saveBundleTemplate.isPending} onPress={() => saveBundleTemplate.mutate({ projectId, name: templateName, entryPath: selectedPath!, paths: selectedBundlePaths })} accessibilityRole="button" accessibilityLabel="حفظ قالب حزمة TypeScript" style={({ pressed }) => [styles.templateSaveButton, { backgroundColor: colors.primary }, (!canPerformSensitiveActions || !hasMultiFileEntry || templateName.trim().length < 2 || saveBundleTemplate.isPending || pressed) && styles.pressed]}><Text style={styles.templateSaveButtonText}>{saveBundleTemplate.isPending ? "جارٍ الحفظ…" : !canPerformSensitiveActions ? "يتطلب اتصالاً" : "حفظ قالب"}</Text></Pressable></View>{bundleTemplates.data?.length ? <View style={styles.templateList}>{bundleTemplates.data.map((template) => <Pressable key={template.id} onPress={() => applyBundleTemplate(template)} accessibilityRole="button" accessibilityLabel={`تطبيق قالب ${template.name}`} style={({ pressed }) => [styles.templateCard, { backgroundColor: colors.surface, borderColor: colors.border }, pressed && styles.pressed]}><Text style={[styles.templateName, { color: colors.foreground }]}>{template.name}</Text><Text style={[styles.templateMeta, { color: colors.muted }]}>{template.paths.length} ملفات · الدخول: {template.entryPath}</Text></Pressable>)}</View> : <Text style={[styles.templateHint, { color: colors.muted }]}>احفظ قالباً بعد اختيار ملف الدخول وملف مساعد واحد على الأقل؛ يطبق القالب الملفات المتاحة فقط.</Text>}{saveBundleTemplate.error ? <Text style={styles.errorText}>تعذر حفظ القالب. تأكد أن الملفات المختارة لا تزال موجودة وصالحة للتشغيل المقيد.</Text> : null}</View>{hasMultiFileEntry ? <Pressable disabled={!canPerformSensitiveActions || requestMultiFileExecution.isPending || !runtimeStatus.data?.canExecuteUserCode} onPress={() => requestMultiFileExecution.mutate({ projectId, entryPath: selectedPath, paths: selectedBundlePaths })} style={({ pressed }) => [styles.runtimeButton, { backgroundColor: colors.primary }, (pressed || !canPerformSensitiveActions || requestMultiFileExecution.isPending || !runtimeStatus.data?.canExecuteUserCode) && styles.pressed]} accessibilityRole="button" accessibilityLabel={`طلب تنفيذ TypeScript متعدد الملفات لعدد ${selectedBundlePaths.length} ملفات مختارة`}><Text style={styles.runtimeButtonText}>{requestMultiFileExecution.isPending ? "جارٍ إنشاء طلب متعدد الملفات…" : !canPerformSensitiveActions ? "يتطلب اتصالاً" : `طلب تنفيذ TypeScript متعدد الملفات (${selectedBundlePaths.length})`}</Text></Pressable> : null}<Text style={[styles.runtimeCopy, { color: colors.muted }]}>التنفيذ متعدد الملفات يقتصر على الملفات التي تحددها داخل `source/` و`tests/`، ويظل محجوباً حتى الموافقة.</Text></View>
-    </View> : null}
-  /></ScreenContainer>;
+  return (
+    <ScreenContainer className="px-5" containerClassName="bg-background">
+      <FlatList<WorkspaceFile>
+        data={files}
+        keyExtractor={(item) => String(item.id)}
+        contentContainerStyle={styles.list}
+        renderItem={({ item }) => {
+          const eligible = isEligibleMultiFilePath(item.path);
+          const included = selectedBundlePaths.includes(item.path);
+          return (
+            <View style={[styles.fileRow, { backgroundColor: colors.surface, borderColor: selectedPath === item.path ? colors.primary : colors.border }]}>
+              <Pressable onPress={() => chooseFile(item.path)} accessibilityRole="button" accessibilityLabel={`فتح الملف ${item.path}`} style={({ pressed }) => [styles.fileOpenArea, pressed && styles.pressed]}>
+                <View style={styles.fileMeta}>
+                  <Text style={[styles.fileVersion, { color: colors.primary }]}>v{item.version}</Text>
+                  <Text style={[styles.fileDate, { color: colors.muted }]}>{formatDate(item.updatedAt)}</Text>
+                </View>
+                <View style={styles.fileName}>
+                  <Text style={[styles.path, { color: colors.foreground }]}>{item.path}</Text>
+                  <Text style={[styles.fileSub, { color: colors.muted }]}>{languageLabel(languageFromPath(item.path))} · ملف افتراضي محفوظ</Text>
+                </View>
+              </Pressable>
+              {eligible ? (
+                <Pressable
+                  onPress={() => setSelectedBundlePaths((current) => toggleMultiFileSelection(current, item.path))}
+                  accessibilityRole="checkbox"
+                  accessibilityState={{ checked: included }}
+                  accessibilityLabel={`${included ? "إزالة" : "إضافة"} ${item.path} من حزمة TypeScript`}
+                  style={({ pressed }) => [styles.bundleToggle, { backgroundColor: included ? colors.primary : colors.subtle, borderColor: included ? colors.primary : colors.border }, pressed && styles.pressed]}
+                >
+                  <Text style={[styles.bundleToggleText, { color: included ? "#FFFFFF" : colors.primary }]}>{included ? "ضمن الحزمة" : "إضافة"}</Text>
+                </Pressable>
+              ) : null}
+            </View>
+          );
+        }}
+        ItemSeparatorComponent={() => <View style={styles.separator} />}
+        ListHeaderComponent={<WorkspaceHeader router={router} colors={colors} projectId={projectId} projectName={params.projectName ?? "المشروع"} directories={directories} />}
+        ListEmptyComponent={!filesQuery.isLoading ? (
+          <View style={[styles.empty, { backgroundColor: colors.surface, borderColor: colors.border }]}>
+            <Text style={[styles.emptyTitle, { color: colors.foreground }]}>{filesQuery.error ? "تعذر تحميل ملفات Workspace" : "لا توجد ملفات محفوظة بعد"}</Text>
+            <Text style={[styles.emptyText, { color: colors.muted }]}>{filesQuery.error ? "تحقق من الاتصال وصلاحية المشروع ثم أعد المحاولة." : "ستظهر هنا الملفات التي ينشئها Runtime أو تضيفها الأدوات المقيدة لاحقاً."}</Text>
+          </View>
+        ) : null}
+        ListFooterComponent={selectedPath ? (
+          <View style={[styles.editorCard, { backgroundColor: colors.surface, borderColor: colors.border }]}>
+            <View style={styles.editorTitleRow}>
+              <View>
+                <Text style={[styles.previewTitle, { color: colors.foreground }]}>{selectedPath}</Text>
+                <Text style={[styles.previewCaption, { color: colors.muted }]}>{selectedFile ? `الإصدار ${selectedFile.version} · ${languageLabel(language)}` : "جارٍ قراءة الملف…"}</Text>
+              </View>
+              <View style={[styles.languagePill, { backgroundColor: colors.subtle }]}><Text style={[styles.languagePillText, { color: colors.primary }]}>{languageLabel(language)}</Text></View>
+            </View>
+            {selectedFile ? <EditorControls mode={editorMode} onMode={setEditorMode} hasChanges={diffSummary.changed} colors={colors} /> : null}
+            {selectedFile && editorMode === "edit" ? <View><TextInput value={draft} onChangeText={setDraft} multiline autoCapitalize="none" autoCorrect={false} spellCheck={false} textAlignVertical="top" style={[styles.input, { color: colors.foreground, backgroundColor: colors.subtle, borderColor: colors.border }]} /><Text style={[styles.highlightLabel, { color: colors.muted }]}>معاينة التمييز الرمزي للمسودة</Text><HighlightedCode content={draft} language={language} colors={colors} /></View> : null}
+            {selectedFile && editorMode === "preview" ? <HighlightedCode content={selectedFile.content} language={language} colors={colors} /> : null}
+            {selectedFile && editorMode === "diff" ? <DiffReview lines={diffLines} colors={colors} /> : null}
+            {selectedFile && editorMode !== "preview" ? (
+              <View>
+                <View style={styles.saveRow}>
+                  <Text style={[styles.diffSummary, { color: colors.muted }]}>{diffSummary.changed ? `+${diffSummary.added} / −${diffSummary.removed} سطر` : "لا توجد تغييرات للحفظ"}</Text>
+                  <Pressable
+                    disabled={!canPerformSensitiveActions || !diffSummary.changed || writeFile.isPending || submitSensitiveChange.isPending || Boolean(activeSensitiveChange)}
+                    onPress={() => sensitivity.sensitive ? submitSensitiveChange.mutate({ projectId, path: selectedPath, content: draft }) : writeFile.mutate({ projectId, path: selectedPath, content: draft })}
+                    accessibilityRole="button"
+                    accessibilityLabel="حفظ تعديل Workspace"
+                    style={({ pressed }) => [styles.saveButton, { backgroundColor: sensitivity.sensitive ? colors.warning : colors.primary }, (!canPerformSensitiveActions || !diffSummary.changed || writeFile.isPending || submitSensitiveChange.isPending || Boolean(activeSensitiveChange) || pressed) && styles.pressed]}
+                  >
+                    <Text style={styles.saveButtonText}>{!canPerformSensitiveActions ? "يتطلب اتصالاً" : activeSensitiveChange ? "بانتظار المراجعة" : submitSensitiveChange.isPending ? "جارٍ إرسال المراجعة…" : writeFile.isPending ? "جارٍ الحفظ…" : sensitivity.sensitive ? "إرسال للمراجعة الثانوية" : "اعتماد وحفظ"}</Text>
+                  </Pressable>
+                </View>
+                {sensitivity.sensitive ? <View style={[styles.secondaryReview, { backgroundColor: "#4A3414", borderColor: "#765724" }]}><Text style={styles.secondaryTitle}>تعديل حساس — حفظ مباشر محجوب</Text><Text style={styles.secondaryCopy}>الإشارات: {sensitivity.reasons.join("، ")}. ستنشأ موافقة ثانوية قبل كتابة المسودة إلى الملف.</Text></View> : null}
+                {activeSensitiveChange ? <Text style={[styles.reviewWaiting, { color: colors.warning }]}>يوجد اقتراح معلق لهذا الملف. افتح مركز التحكم لاتخاذ قرار المراجعة الثانوية.</Text> : null}
+              </View>
+            ) : null}
+            {writeFile.error || submitSensitiveChange.error ? <Text style={styles.errorText}>تعذر معالجة المسودة. لم يتغير الملف المحفوظ؛ راجع المسار أو الاتصال ثم أعد المحاولة.</Text> : null}
+            <View style={[styles.runtimeGate, { backgroundColor: colors.subtle, borderColor: colors.border }]}>
+              <Text style={[styles.runtimeTitle, { color: colors.foreground }]}>{runtimeStatus.data?.label ?? "حالة بيئة Runtime"}</Text>
+              <Text style={[styles.runtimeCopy, { color: colors.muted }]}>{latestRuntimeRequest ? runtimeRequestMessage(latestRuntimeRequest.status, latestRuntimeRequest.exitCode) : runtimeStatus.data?.detail ?? "جارٍ فحص حالة البيئة."}</Text>
+              <Pressable
+                disabled={!canPerformSensitiveActions || !selectedFile || requestExecution.isPending || !runtimeStatus.data?.canExecuteUserCode}
+                onPress={() => requestExecution.mutate({ projectId, targetPath: selectedPath })}
+                style={({ pressed }) => [styles.runtimeButton, { backgroundColor: colors.primary }, (pressed || !canPerformSensitiveActions || requestExecution.isPending || !selectedFile || !runtimeStatus.data?.canExecuteUserCode) && styles.pressed]}
+                accessibilityRole="button"
+                accessibilityLabel="طلب تنفيذ معزول للملف المحدد"
+              >
+                <Text style={styles.runtimeButtonText}>{requestExecution.isPending ? "جارٍ إنشاء طلب الموافقة…" : !canPerformSensitiveActions ? "يتطلب اتصالاً" : runtimeStatus.data?.canExecuteUserCode ? "طلب تنفيذ معزول" : "اربط Runner من الإعدادات"}</Text>
+              </Pressable>
+              <View style={[styles.bundleSummary, { borderColor: colors.border }]}>
+                <Text style={[styles.bundleSummaryTitle, { color: colors.foreground }]}>حزمة TypeScript يدوية</Text>
+                <Text style={[styles.runtimeCopy, { color: colors.muted }]}>{selectedBundlePaths.length ? `اخترت ${selectedBundlePaths.length} من أصل ${eligibleMultiFilePaths.length} ملفاً مؤهلاً.` : "اختر ملفين أو أكثر من أزرار «إضافة» بجانب الملفات المؤهلة."}</Text>
+                {selectedPath && !selectedBundlePaths.includes(selectedPath) ? <Text style={[styles.bundleWarning, { color: colors.warning }]}>أضف الملف المفتوح ليكون ملف الدخول قبل طلب التنفيذ متعدد الملفات.</Text> : null}
+                <BundleTemplateManager
+                  colors={colors}
+                  templates={bundleTemplates.data ?? []}
+                  templateName={templateName}
+                  onTemplateNameChange={setTemplateName}
+                  canManage={canPerformSensitiveActions}
+                  canSave={hasMultiFileEntry}
+                  savePending={saveBundleTemplate.isPending}
+                  renamePending={renameBundleTemplate.isPending}
+                  deletePending={deleteBundleTemplate.isPending}
+                  editingTemplateId={editingTemplateId}
+                  editingTemplateName={editingTemplateName}
+                  onStartRename={(template) => { setEditingTemplateId(template.id); setEditingTemplateName(template.name); }}
+                  onCancelRename={() => { setEditingTemplateId(null); setEditingTemplateName(""); }}
+                  onEditingTemplateNameChange={setEditingTemplateName}
+                  onSave={() => saveBundleTemplate.mutate({ projectId, name: templateName, entryPath: selectedPath, paths: selectedBundlePaths })}
+                  onRename={(templateId) => renameBundleTemplate.mutate({ projectId, templateId, name: editingTemplateName })}
+                  onDelete={confirmDeleteTemplate}
+                  onApply={applyBundleTemplate}
+                  error={saveBundleTemplate.error ?? renameBundleTemplate.error ?? deleteBundleTemplate.error}
+                />
+              </View>
+              {hasMultiFileEntry ? <Pressable disabled={!canPerformSensitiveActions || requestMultiFileExecution.isPending || !runtimeStatus.data?.canExecuteUserCode} onPress={() => requestMultiFileExecution.mutate({ projectId, entryPath: selectedPath, paths: selectedBundlePaths })} style={({ pressed }) => [styles.runtimeButton, { backgroundColor: colors.primary }, (pressed || !canPerformSensitiveActions || requestMultiFileExecution.isPending || !runtimeStatus.data?.canExecuteUserCode) && styles.pressed]} accessibilityRole="button" accessibilityLabel={`طلب تنفيذ TypeScript متعدد الملفات لعدد ${selectedBundlePaths.length} ملفات مختارة`}><Text style={styles.runtimeButtonText}>{requestMultiFileExecution.isPending ? "جارٍ إنشاء طلب متعدد الملفات…" : !canPerformSensitiveActions ? "يتطلب اتصالاً" : `طلب تنفيذ TypeScript متعدد الملفات (${selectedBundlePaths.length})`}</Text></Pressable> : null}
+              <Text style={[styles.runtimeCopy, { color: colors.muted }]}>التنفيذ متعدد الملفات يقتصر على الملفات التي تحددها داخل `source/` و`tests/`، ويظل محجوباً حتى الموافقة.</Text>
+            </View>
+          </View>
+        ) : null}
+      />
+    </ScreenContainer>
+  );
 }
 
-function WorkspaceHeader({ router, colors, projectId, projectName, directories }: { router: ReturnType<typeof useRouter>; colors: ReturnType<typeof useColors>; projectId: number; projectName: string; directories: string[] }) { return <View><View style={styles.topRow}><Pressable onPress={() => router.back()} style={({ pressed }) => [styles.back, { borderColor: colors.border }, pressed && styles.pressed]}><Text style={[styles.backText, { color: colors.primary }]}>← العودة</Text></Pressable><View><Text style={[styles.eyebrow, { color: colors.primary }]}>مساحة تنفيذ مقيدة</Text><Text style={[styles.heading, { color: colors.foreground }]}>Workspace</Text></View></View><Text style={[styles.projectName, { color: colors.muted }]}>{projectName}</Text><View style={[styles.policyCard, { backgroundColor: colors.subtle, borderColor: colors.border }]}><Text style={[styles.policyTitle, { color: colors.foreground }]}>محرر بمراجعة قبل الحفظ</Text><Text style={[styles.policyCopy, { color: colors.muted }]}>اعرض المسودة المميزة، راجع الفرق السطري، ثم اعتمدها لحفظها داخل Workspace وسجل التدقيق فقط.</Text><View style={styles.directoryList}>{directories.map((directory) => <Text key={directory} style={[styles.directory, { color: colors.primary }]}>{directory}</Text>)}</View><Pressable onPress={() => router.push({ pathname: "/workspace-history", params: { projectId: String(projectId), projectName } })} style={({ pressed }) => [styles.historyButton, { borderColor: colors.primary }, pressed && styles.pressed]}><Text style={[styles.historyButtonText, { color: colors.primary }]}>سجل الفروقات المعتمدة ←</Text></Pressable></View><Text style={[styles.sectionTitle, { color: colors.foreground }]}>الملفات المحفوظة</Text></View>; }
+function BundleTemplateManager({
+  colors,
+  templates,
+  templateName,
+  onTemplateNameChange,
+  canManage,
+  canSave,
+  savePending,
+  renamePending,
+  deletePending,
+  editingTemplateId,
+  editingTemplateName,
+  onStartRename,
+  onCancelRename,
+  onEditingTemplateNameChange,
+  onSave,
+  onRename,
+  onDelete,
+  onApply,
+  error,
+}: {
+  colors: ReturnType<typeof useColors>;
+  templates: BundleTemplate[];
+  templateName: string;
+  onTemplateNameChange: (value: string) => void;
+  canManage: boolean;
+  canSave: boolean;
+  savePending: boolean;
+  renamePending: boolean;
+  deletePending: boolean;
+  editingTemplateId: number | null;
+  editingTemplateName: string;
+  onStartRename: (template: BundleTemplate) => void;
+  onCancelRename: () => void;
+  onEditingTemplateNameChange: (value: string) => void;
+  onSave: () => void;
+  onRename: (templateId: number) => void;
+  onDelete: (template: Pick<BundleTemplate, "id" | "name">) => void;
+  onApply: (template: BundleTemplate) => void;
+  error: { message: string } | null;
+}) {
+  const canSaveTemplate = canManage && canSave && templateName.trim().length >= 2 && !savePending;
+  return (
+    <View>
+      <View style={styles.templateSaveRow}>
+        <TextInput value={templateName} onChangeText={onTemplateNameChange} placeholder="اسم القالب، مثال: اختبارات الوحدة" placeholderTextColor={colors.muted} maxLength={80} returnKeyType="done" style={[styles.templateInput, { color: colors.foreground, backgroundColor: colors.surface, borderColor: colors.border }]} />
+        <Pressable disabled={!canSaveTemplate} onPress={onSave} accessibilityRole="button" accessibilityLabel="حفظ قالب حزمة TypeScript" style={({ pressed }) => [styles.templateSaveButton, { backgroundColor: colors.primary }, (!canSaveTemplate || pressed) && styles.pressed]}><Text style={styles.templateSaveButtonText}>{savePending ? "جارٍ الحفظ…" : !canManage ? "يتطلب اتصالاً" : "حفظ قالب"}</Text></Pressable>
+      </View>
+      {templates.length ? (
+        <View style={styles.templateList}>
+          {templates.map((template) => {
+            const editing = editingTemplateId === template.id;
+            const canRename = canManage && editingTemplateName.trim().length >= 2 && !renamePending;
+            return (
+              <View key={template.id} style={[styles.templateCard, { backgroundColor: colors.surface, borderColor: colors.border }]}>
+                {editing ? (
+                  <View>
+                    <TextInput value={editingTemplateName} onChangeText={onEditingTemplateNameChange} placeholder="اسم القالب" placeholderTextColor={colors.muted} maxLength={80} autoFocus returnKeyType="done" style={[styles.templateEditInput, { color: colors.foreground, backgroundColor: colors.subtle, borderColor: colors.border }]} />
+                    <View style={styles.templateActionRow}>
+                      <Pressable disabled={!canRename} onPress={() => onRename(template.id)} accessibilityRole="button" accessibilityLabel={`حفظ الاسم الجديد للقالب ${template.name}`} style={({ pressed }) => [styles.templateActionPrimary, { backgroundColor: colors.primary }, (!canRename || pressed) && styles.pressed]}><Text style={styles.templateActionPrimaryText}>{renamePending ? "جارٍ الحفظ…" : "حفظ الاسم"}</Text></Pressable>
+                      <Pressable onPress={onCancelRename} accessibilityRole="button" accessibilityLabel="إلغاء إعادة التسمية" style={({ pressed }) => [styles.templateActionSecondary, { borderColor: colors.border }, pressed && styles.pressed]}><Text style={[styles.templateActionSecondaryText, { color: colors.muted }]}>إلغاء</Text></Pressable>
+                    </View>
+                  </View>
+                ) : (
+                  <View>
+                    <Pressable onPress={() => onApply(template)} accessibilityRole="button" accessibilityLabel={`تطبيق قالب ${template.name}`} style={({ pressed }) => [styles.templateApplyArea, pressed && styles.pressed]}>
+                      <Text style={[styles.templateName, { color: colors.foreground }]}>{template.name}</Text>
+                      <Text style={[styles.templateMeta, { color: colors.muted }]}>{template.paths.length} ملفات · الدخول: {template.entryPath}</Text>
+                    </Pressable>
+                    <View style={styles.templateActionRow}>
+                      <Pressable disabled={!canManage || deletePending} onPress={() => onDelete(template)} accessibilityRole="button" accessibilityLabel={`حذف قالب ${template.name}`} style={({ pressed }) => [styles.templateDeleteButton, { borderColor: colors.error }, (!canManage || deletePending || pressed) && styles.pressed]}><Text style={[styles.templateDeleteText, { color: colors.error }]}>{deletePending ? "جارٍ الحذف…" : "حذف"}</Text></Pressable>
+                      <Pressable disabled={!canManage} onPress={() => onStartRename(template)} accessibilityRole="button" accessibilityLabel={`إعادة تسمية قالب ${template.name}`} style={({ pressed }) => [styles.templateRenameButton, { borderColor: colors.primary }, (!canManage || pressed) && styles.pressed]}><Text style={[styles.templateRenameText, { color: colors.primary }]}>{canManage ? "إعادة تسمية" : "يتطلب اتصالاً"}</Text></Pressable>
+                    </View>
+                  </View>
+                )}
+              </View>
+            );
+          })}
+        </View>
+      ) : <Text style={[styles.templateHint, { color: colors.muted }]}>احفظ قالباً بعد اختيار ملف الدخول وملف مساعد واحد على الأقل؛ يطبق القالب الملفات المتاحة فقط.</Text>}
+      {error ? <Text style={styles.errorText}>تعذر تحديث القالب. تحقق من الاسم والاتصال ومن أن القالب ما زال موجوداً داخل المشروع.</Text> : null}
+    </View>
+  );
+}
 
-function EditorControls({ mode, onMode, hasChanges, colors }: { mode: EditorMode; onMode: (mode: EditorMode) => void; hasChanges: boolean; colors: ReturnType<typeof useColors> }) { return <View style={[styles.modeBar, { backgroundColor: colors.subtle }]}>{(["preview", "edit", "diff"] as const).map((item) => <Pressable key={item} onPress={() => onMode(item)} style={({ pressed }) => [styles.modeButton, mode === item && { backgroundColor: colors.elevated }, pressed && styles.pressed]}><Text style={[styles.modeText, { color: mode === item ? colors.primary : colors.muted }]}>{item === "preview" ? "معاينة" : item === "edit" ? "تحرير" : `فروقات${hasChanges ? " •" : ""}`}</Text></Pressable>)}</View>; }
+function WorkspaceHeader({ router, colors, projectId, projectName, directories }: { router: ReturnType<typeof useRouter>; colors: ReturnType<typeof useColors>; projectId: number; projectName: string; directories: string[] }) {
+  return <View><View style={styles.topRow}><Pressable onPress={() => router.back()} style={({ pressed }) => [styles.back, { borderColor: colors.border }, pressed && styles.pressed]}><Text style={[styles.backText, { color: colors.primary }]}>← العودة</Text></Pressable><View><Text style={[styles.eyebrow, { color: colors.primary }]}>مساحة تنفيذ مقيدة</Text><Text style={[styles.heading, { color: colors.foreground }]}>Workspace</Text></View></View><Text style={[styles.projectName, { color: colors.muted }]}>{projectName}</Text><View style={[styles.policyCard, { backgroundColor: colors.subtle, borderColor: colors.border }]}><Text style={[styles.policyTitle, { color: colors.foreground }]}>محرر بمراجعة قبل الحفظ</Text><Text style={[styles.policyCopy, { color: colors.muted }]}>اعرض المسودة المميزة، راجع الفرق السطري، ثم اعتمدها لحفظها داخل Workspace وسجل التدقيق فقط.</Text><View style={styles.directoryList}>{directories.map((directory) => <Text key={directory} style={[styles.directory, { color: colors.primary }]}>{directory}</Text>)}</View><Pressable onPress={() => router.push({ pathname: "/workspace-history", params: { projectId: String(projectId), projectName } })} style={({ pressed }) => [styles.historyButton, { borderColor: colors.primary }, pressed && styles.pressed]}><Text style={[styles.historyButtonText, { color: colors.primary }]}>سجل الفروقات المعتمدة ←</Text></Pressable></View><Text style={[styles.sectionTitle, { color: colors.foreground }]}>الملفات المحفوظة</Text></View>;
+}
 
-function HighlightedCode({ content, language, colors }: { content: string; language: ReturnType<typeof languageFromPath>; colors: ReturnType<typeof useColors> }) { const lines = content.split("\n"); return <View style={[styles.codeBox, { backgroundColor: colors.subtle }]}>{lines.map((line, index) => <Text key={`${index}-${line}`} style={styles.codeLine}><Text style={[styles.lineNumber, { color: colors.muted }]}>{String(index + 1).padStart(3, " ")} </Text>{tokenizeCodeLine(line, language).map((token, tokenIndex) => <Text key={`${tokenIndex}-${token.value}`} style={{ color: tokenColor(token.kind, colors) }}>{token.value}</Text>)}</Text>)}</View>; }
+function EditorControls({ mode, onMode, hasChanges, colors }: { mode: EditorMode; onMode: (mode: EditorMode) => void; hasChanges: boolean; colors: ReturnType<typeof useColors> }) {
+  return <View style={[styles.modeBar, { backgroundColor: colors.subtle }]}>{(["preview", "edit", "diff"] as const).map((item) => <Pressable key={item} onPress={() => onMode(item)} style={({ pressed }) => [styles.modeButton, mode === item && { backgroundColor: colors.elevated }, pressed && styles.pressed]}><Text style={[styles.modeText, { color: mode === item ? colors.primary : colors.muted }]}>{item === "preview" ? "معاينة" : item === "edit" ? "تحرير" : `فروقات${hasChanges ? " •" : ""}`}</Text></Pressable>)}</View>;
+}
 
-function DiffReview({ lines, colors }: { lines: DiffLine[]; colors: ReturnType<typeof useColors> }) { const visibleLines = lines.slice(0, 120); return <View style={styles.diffBox}>{visibleLines.map((line, index) => <View key={`${index}-${line.content}`} style={[styles.diffRow, { backgroundColor: line.kind === "added" ? "#153A2A" : line.kind === "removed" ? "#40222D" : colors.subtle }]}><Text style={[styles.diffMark, { color: line.kind === "added" ? "#74E1B0" : line.kind === "removed" ? "#FFACB7" : colors.muted }]}>{line.kind === "added" ? "+" : line.kind === "removed" ? "−" : " "}</Text><Text style={[styles.diffNumber, { color: colors.muted }]}>{line.newNumber ?? line.oldNumber ?? ""}</Text><Text selectable style={[styles.diffContent, { color: colors.foreground }]}>{line.content || " "}</Text></View>)}{lines.length > visibleLines.length ? <Text style={[styles.previewCaption, { color: colors.muted }]}>يعرض أول 120 سطراً من الفرق لحماية أداء الجهاز.</Text> : null}</View>; }
+function HighlightedCode({ content, language, colors }: { content: string; language: ReturnType<typeof languageFromPath>; colors: ReturnType<typeof useColors> }) {
+  const lines = content.split("\n");
+  return <View style={[styles.codeBox, { backgroundColor: colors.subtle }]}>{lines.map((line, index) => <Text key={`${index}-${line}`} style={styles.codeLine}><Text style={[styles.lineNumber, { color: colors.muted }]}>{String(index + 1).padStart(3, " ")} </Text>{tokenizeCodeLine(line, language).map((token, tokenIndex) => <Text key={`${tokenIndex}-${token.value}`} style={{ color: tokenColor(token.kind, colors) }}>{token.value}</Text>)}</Text>)}</View>;
+}
 
-function tokenColor(kind: ReturnType<typeof tokenizeCodeLine>[number]["kind"], colors: ReturnType<typeof useColors>) { return kind === "comment" ? colors.muted : kind === "keyword" ? "#A78BFA" : kind === "string" ? "#4ADE80" : kind === "number" ? "#FBBF24" : kind === "property" ? "#67E8F9" : kind === "tag" ? "#F9A8D4" : colors.foreground; }
-function formatDate(value: Date) { const date = new Date(value); return Number.isNaN(date.getTime()) ? "غير معروف" : date.toLocaleDateString("ar"); }
-function runtimeRequestMessage(status: string, exitCode: number | null) { return status === "awaiting_approval" ? "ينتظر الطلب موافقة صريحة قبل الإتاحة إلى Runner المحلي." : status === "queued" ? "اعتمد الطلب وينتظر Runner المحلي المتصل." : status === "claimed" ? "يحجز Runner المحلي الطلب وينفذه داخل حاوية مقيدة." : status === "completed" ? `اكتمل التنفيذ المحدود بنجاح (exit ${exitCode ?? 0}).` : status === "failed" ? `انتهى التنفيذ بفشل (exit ${exitCode ?? "غير معروف"}). راجع سجل Runtime.` : status === "environment_required" ? "سُجل الطلب، لكن Runner المحلي غير متصل." : "الطلب محجوب أو ملغى؛ راجع مركز التحكم."; }
+function DiffReview({ lines, colors }: { lines: DiffLine[]; colors: ReturnType<typeof useColors> }) {
+  const visibleLines = lines.slice(0, 120);
+  return <View style={styles.diffBox}>{visibleLines.map((line, index) => <View key={`${index}-${line.content}`} style={[styles.diffRow, { backgroundColor: line.kind === "added" ? "#153A2A" : line.kind === "removed" ? "#40222D" : colors.subtle }]}><Text style={[styles.diffMark, { color: line.kind === "added" ? "#74E1B0" : line.kind === "removed" ? "#FFACB7" : colors.muted }]}>{line.kind === "added" ? "+" : line.kind === "removed" ? "−" : " "}</Text><Text style={[styles.diffNumber, { color: colors.muted }]}>{line.newNumber ?? line.oldNumber ?? ""}</Text><Text selectable style={[styles.diffContent, { color: colors.foreground }]}>{line.content || " "}</Text></View>)}{lines.length > visibleLines.length ? <Text style={[styles.previewCaption, { color: colors.muted }]}>يعرض أول 120 سطراً من الفرق لحماية أداء الجهاز.</Text> : null}</View>;
+}
+
+function tokenColor(kind: ReturnType<typeof tokenizeCodeLine>[number]["kind"], colors: ReturnType<typeof useColors>) {
+  return kind === "comment" ? colors.muted : kind === "keyword" ? "#A78BFA" : kind === "string" ? "#4ADE80" : kind === "number" ? "#FBBF24" : kind === "property" ? "#67E8F9" : kind === "tag" ? "#F9A8D4" : colors.foreground;
+}
+
+function formatDate(value: Date) {
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? "غير معروف" : date.toLocaleDateString("ar");
+}
+
+function runtimeRequestMessage(status: string, exitCode: number | null) {
+  return status === "awaiting_approval" ? "ينتظر الطلب موافقة صريحة قبل الإتاحة إلى Runner المحلي." : status === "queued" ? "اعتمد الطلب وينتظر Runner المحلي المتصل." : status === "claimed" ? "يحجز Runner المحلي الطلب وينفذه داخل حاوية مقيدة." : status === "completed" ? `اكتمل التنفيذ المحدود بنجاح (exit ${exitCode ?? 0}).` : status === "failed" ? `انتهى التنفيذ بفشل (exit ${exitCode ?? "غير معروف"}). راجع سجل Runtime.` : status === "environment_required" ? "سُجل الطلب، لكن Runner المحلي غير متصل." : "الطلب محجوب أو ملغى؛ راجع مركز التحكم.";
+}
 
 const styles = StyleSheet.create({
-  list: { paddingBottom: 42, paddingTop: 18 }, topRow: { alignItems: "flex-start", flexDirection: "row-reverse", justifyContent: "space-between" }, back: { borderRadius: 10, borderWidth: 1, paddingHorizontal: 11, paddingVertical: 8 }, backText: { fontSize: 12, fontWeight: "900" }, eyebrow: { fontSize: 12, fontWeight: "900", textAlign: "right" }, heading: { fontSize: 30, fontWeight: "900", marginTop: 2, textAlign: "right" }, projectName: { fontSize: 13, marginTop: 8, textAlign: "right" }, policyCard: { borderRadius: 18, borderWidth: 1, marginTop: 18, padding: 14 }, policyTitle: { fontSize: 14, fontWeight: "900", textAlign: "right" }, policyCopy: { fontSize: 12, lineHeight: 19, marginTop: 5, textAlign: "right" }, directoryList: { flexDirection: "row-reverse", flexWrap: "wrap", gap: 7, marginTop: 12 }, directory: { fontSize: 11, fontWeight: "800" }, historyButton: { alignItems: "center", borderRadius: 10, borderWidth: 1, marginTop: 13, paddingVertical: 10 }, historyButtonText: { fontSize: 12, fontWeight: "900" }, sectionTitle: { fontSize: 17, fontWeight: "900", marginBottom: 12, marginTop: 22, textAlign: "right" }, fileRow: { alignItems: "center", borderRadius: 15, borderWidth: 1, flexDirection: "row-reverse", padding: 13 }, fileOpenArea: { alignItems: "center", flex: 1, flexDirection: "row-reverse" }, fileName: { flex: 1, marginLeft: 12 }, path: { fontSize: 13, fontWeight: "900", textAlign: "right" }, fileSub: { fontSize: 11, marginTop: 4, textAlign: "right" }, fileMeta: { alignItems: "flex-start" }, fileVersion: { fontSize: 12, fontWeight: "900" }, fileDate: { fontSize: 10, marginTop: 4 }, bundleToggle: { alignItems: "center", borderRadius: 9, borderWidth: 1, marginRight: 8, paddingHorizontal: 8, paddingVertical: 7 }, bundleToggleText: { fontSize: 10, fontWeight: "900" }, separator: { height: 9 }, empty: { borderRadius: 17, borderWidth: 1, padding: 18 }, emptyTitle: { fontSize: 14, fontWeight: "900", textAlign: "right" }, emptyText: { fontSize: 12, lineHeight: 19, marginTop: 5, textAlign: "right" }, editorCard: { borderRadius: 18, borderWidth: 1, marginTop: 20, padding: 14 }, editorTitleRow: { alignItems: "flex-start", flexDirection: "row-reverse", justifyContent: "space-between" }, previewTitle: { fontSize: 14, fontWeight: "900", textAlign: "right" }, previewCaption: { fontSize: 11, marginTop: 5, textAlign: "right" }, languagePill: { borderRadius: 99, paddingHorizontal: 9, paddingVertical: 5 }, languagePillText: { fontSize: 10, fontWeight: "900" }, modeBar: { borderRadius: 12, flexDirection: "row-reverse", marginTop: 13, padding: 3 }, modeButton: { alignItems: "center", borderRadius: 9, flex: 1, paddingVertical: 8 }, modeText: { fontSize: 11, fontWeight: "900" }, input: { borderRadius: 12, borderWidth: 1, fontFamily: "monospace", fontSize: 12, lineHeight: 19, marginTop: 12, minHeight: 180, padding: 12, textAlign: "left" }, highlightLabel: { fontSize: 11, marginTop: 12, textAlign: "right" }, codeBox: { borderRadius: 12, marginTop: 12, overflow: "hidden", padding: 11 }, codeLine: { fontFamily: "monospace", fontSize: 12, lineHeight: 19, textAlign: "left" }, lineNumber: { fontFamily: "monospace" }, diffBox: { borderRadius: 12, marginTop: 12, overflow: "hidden" }, diffRow: { flexDirection: "row", minHeight: 22, paddingHorizontal: 8, paddingVertical: 2 }, diffMark: { fontFamily: "monospace", fontSize: 12, width: 16 }, diffNumber: { fontFamily: "monospace", fontSize: 11, paddingRight: 8, width: 35 }, diffContent: { flex: 1, fontFamily: "monospace", fontSize: 12, lineHeight: 18, textAlign: "left" }, saveRow: { alignItems: "center", flexDirection: "row-reverse", justifyContent: "space-between", marginTop: 14 }, diffSummary: { flex: 1, fontSize: 11, textAlign: "right" }, saveButton: { alignItems: "center", borderRadius: 10, marginRight: 10, paddingHorizontal: 14, paddingVertical: 10 }, saveButtonText: { color: "#FFFFFF", fontSize: 12, fontWeight: "900" }, secondaryReview: { borderRadius: 12, borderWidth: 1, marginTop: 10, padding: 11 }, secondaryTitle: { color: "#FFE1A6", fontSize: 12, fontWeight: "900", textAlign: "right" }, secondaryCopy: { color: "#F2C875", fontSize: 11, lineHeight: 17, marginTop: 4, textAlign: "right" }, reviewWaiting: { fontSize: 11, lineHeight: 18, marginTop: 8, textAlign: "right" }, errorText: { color: "#FFACB7", fontSize: 11, lineHeight: 18, marginTop: 10, textAlign: "right" }, runtimeGate: { borderRadius: 14, borderWidth: 1, marginTop: 14, padding: 12 }, runtimeTitle: { fontSize: 12, fontWeight: "900", textAlign: "right" }, runtimeCopy: { fontSize: 11, lineHeight: 17, marginTop: 4, textAlign: "right" }, bundleSummary: { borderRadius: 10, borderWidth: 1, marginTop: 12, padding: 10 }, bundleSummaryTitle: { fontSize: 11, fontWeight: "900", textAlign: "right" }, bundleWarning: { fontSize: 10, fontWeight: "800", lineHeight: 16, marginTop: 6, textAlign: "right" }, templateSaveRow: { flexDirection: "row-reverse", gap: 8, marginTop: 11 }, templateInput: { borderRadius: 9, borderWidth: 1, flex: 1, fontSize: 11, paddingHorizontal: 10, paddingVertical: 9, textAlign: "right" }, templateSaveButton: { alignItems: "center", borderRadius: 9, justifyContent: "center", paddingHorizontal: 10 }, templateSaveButtonText: { color: "#FFFFFF", fontSize: 10, fontWeight: "900" }, templateList: { gap: 7, marginTop: 10 }, templateCard: { borderRadius: 10, borderWidth: 1, padding: 10 }, templateName: { fontSize: 11, fontWeight: "900", textAlign: "right" }, templateMeta: { fontSize: 10, marginTop: 4, textAlign: "right" }, templateHint: { fontSize: 10, lineHeight: 16, marginTop: 10, textAlign: "right" }, runtimeButton: { alignItems: "center", borderRadius: 10, marginTop: 10, paddingVertical: 10 }, runtimeButtonText: { color: "#FFFFFF", fontSize: 12, fontWeight: "900" }, pressed: { opacity: 0.75, transform: [{ scale: 0.99 }] },
+  list: { paddingBottom: 42, paddingTop: 18 },
+  topRow: { alignItems: "flex-start", flexDirection: "row-reverse", justifyContent: "space-between" },
+  back: { borderRadius: 10, borderWidth: 1, paddingHorizontal: 11, paddingVertical: 8 },
+  backText: { fontSize: 12, fontWeight: "900" },
+  eyebrow: { fontSize: 12, fontWeight: "900", textAlign: "right" },
+  heading: { fontSize: 30, fontWeight: "900", marginTop: 2, textAlign: "right" },
+  projectName: { fontSize: 13, marginTop: 8, textAlign: "right" },
+  policyCard: { borderRadius: 18, borderWidth: 1, marginTop: 18, padding: 14 },
+  policyTitle: { fontSize: 14, fontWeight: "900", textAlign: "right" },
+  policyCopy: { fontSize: 12, lineHeight: 19, marginTop: 5, textAlign: "right" },
+  directoryList: { flexDirection: "row-reverse", flexWrap: "wrap", gap: 7, marginTop: 12 },
+  directory: { fontSize: 11, fontWeight: "800" },
+  historyButton: { alignItems: "center", borderRadius: 10, borderWidth: 1, marginTop: 13, paddingVertical: 10 },
+  historyButtonText: { fontSize: 12, fontWeight: "900" },
+  sectionTitle: { fontSize: 17, fontWeight: "900", marginBottom: 12, marginTop: 22, textAlign: "right" },
+  fileRow: { alignItems: "center", borderRadius: 15, borderWidth: 1, flexDirection: "row-reverse", padding: 13 },
+  fileOpenArea: { alignItems: "center", flex: 1, flexDirection: "row-reverse" },
+  fileName: { flex: 1, marginLeft: 12 },
+  path: { fontSize: 13, fontWeight: "900", textAlign: "right" },
+  fileSub: { fontSize: 11, marginTop: 4, textAlign: "right" },
+  fileMeta: { alignItems: "flex-start" },
+  fileVersion: { fontSize: 12, fontWeight: "900" },
+  fileDate: { fontSize: 10, marginTop: 4 },
+  bundleToggle: { alignItems: "center", borderRadius: 9, borderWidth: 1, marginRight: 8, paddingHorizontal: 8, paddingVertical: 7 },
+  bundleToggleText: { fontSize: 10, fontWeight: "900" },
+  separator: { height: 9 },
+  empty: { borderRadius: 17, borderWidth: 1, padding: 18 },
+  emptyTitle: { fontSize: 14, fontWeight: "900", textAlign: "right" },
+  emptyText: { fontSize: 12, lineHeight: 19, marginTop: 5, textAlign: "right" },
+  editorCard: { borderRadius: 18, borderWidth: 1, marginTop: 20, padding: 14 },
+  editorTitleRow: { alignItems: "flex-start", flexDirection: "row-reverse", justifyContent: "space-between" },
+  previewTitle: { fontSize: 14, fontWeight: "900", textAlign: "right" },
+  previewCaption: { fontSize: 11, marginTop: 5, textAlign: "right" },
+  languagePill: { borderRadius: 99, paddingHorizontal: 9, paddingVertical: 5 },
+  languagePillText: { fontSize: 10, fontWeight: "900" },
+  modeBar: { borderRadius: 12, flexDirection: "row-reverse", marginTop: 13, padding: 3 },
+  modeButton: { alignItems: "center", borderRadius: 9, flex: 1, paddingVertical: 8 },
+  modeText: { fontSize: 11, fontWeight: "900" },
+  input: { borderRadius: 12, borderWidth: 1, fontFamily: "monospace", fontSize: 12, lineHeight: 19, marginTop: 12, minHeight: 180, padding: 12, textAlign: "left" },
+  highlightLabel: { fontSize: 11, marginTop: 12, textAlign: "right" },
+  codeBox: { borderRadius: 12, marginTop: 12, overflow: "hidden", padding: 11 },
+  codeLine: { fontFamily: "monospace", fontSize: 12, lineHeight: 19, textAlign: "left" },
+  lineNumber: { fontFamily: "monospace" },
+  diffBox: { borderRadius: 12, marginTop: 12, overflow: "hidden" },
+  diffRow: { flexDirection: "row", minHeight: 22, paddingHorizontal: 8, paddingVertical: 2 },
+  diffMark: { fontFamily: "monospace", fontSize: 12, width: 16 },
+  diffNumber: { fontFamily: "monospace", fontSize: 11, paddingRight: 8, width: 35 },
+  diffContent: { flex: 1, fontFamily: "monospace", fontSize: 12, lineHeight: 18, textAlign: "left" },
+  saveRow: { alignItems: "center", flexDirection: "row-reverse", justifyContent: "space-between", marginTop: 14 },
+  diffSummary: { flex: 1, fontSize: 11, textAlign: "right" },
+  saveButton: { alignItems: "center", borderRadius: 10, marginRight: 10, paddingHorizontal: 14, paddingVertical: 10 },
+  saveButtonText: { color: "#FFFFFF", fontSize: 12, fontWeight: "900" },
+  secondaryReview: { borderRadius: 12, borderWidth: 1, marginTop: 10, padding: 11 },
+  secondaryTitle: { color: "#FFE1A6", fontSize: 12, fontWeight: "900", textAlign: "right" },
+  secondaryCopy: { color: "#F2C875", fontSize: 11, lineHeight: 17, marginTop: 4, textAlign: "right" },
+  reviewWaiting: { fontSize: 11, lineHeight: 18, marginTop: 8, textAlign: "right" },
+  errorText: { color: "#FFACB7", fontSize: 11, lineHeight: 18, marginTop: 10, textAlign: "right" },
+  runtimeGate: { borderRadius: 14, borderWidth: 1, marginTop: 14, padding: 12 },
+  runtimeTitle: { fontSize: 12, fontWeight: "900", textAlign: "right" },
+  runtimeCopy: { fontSize: 11, lineHeight: 17, marginTop: 4, textAlign: "right" },
+  bundleSummary: { borderRadius: 10, borderWidth: 1, marginTop: 12, padding: 10 },
+  bundleSummaryTitle: { fontSize: 11, fontWeight: "900", textAlign: "right" },
+  bundleWarning: { fontSize: 10, fontWeight: "800", lineHeight: 16, marginTop: 6, textAlign: "right" },
+  templateSaveRow: { flexDirection: "row-reverse", gap: 8, marginTop: 11 },
+  templateInput: { borderRadius: 9, borderWidth: 1, flex: 1, fontSize: 11, paddingHorizontal: 10, paddingVertical: 9, textAlign: "right" },
+  templateSaveButton: { alignItems: "center", borderRadius: 9, justifyContent: "center", paddingHorizontal: 10 },
+  templateSaveButtonText: { color: "#FFFFFF", fontSize: 10, fontWeight: "900" },
+  templateList: { gap: 7, marginTop: 10 },
+  templateCard: { borderRadius: 10, borderWidth: 1, padding: 10 },
+  templateApplyArea: { borderRadius: 7, padding: 2 },
+  templateName: { fontSize: 11, fontWeight: "900", textAlign: "right" },
+  templateMeta: { fontSize: 10, marginTop: 4, textAlign: "right" },
+  templateHint: { fontSize: 10, lineHeight: 16, marginTop: 10, textAlign: "right" },
+  templateActionRow: { flexDirection: "row-reverse", gap: 7, marginTop: 10 },
+  templateRenameButton: { alignItems: "center", borderRadius: 8, borderWidth: 1, flex: 1, paddingVertical: 7 },
+  templateRenameText: { fontSize: 10, fontWeight: "900" },
+  templateDeleteButton: { alignItems: "center", borderRadius: 8, borderWidth: 1, flex: 1, paddingVertical: 7 },
+  templateDeleteText: { fontSize: 10, fontWeight: "900" },
+  templateEditInput: { borderRadius: 8, borderWidth: 1, fontSize: 11, paddingHorizontal: 9, paddingVertical: 8, textAlign: "right" },
+  templateActionPrimary: { alignItems: "center", borderRadius: 8, flex: 1, paddingVertical: 8 },
+  templateActionPrimaryText: { color: "#FFFFFF", fontSize: 10, fontWeight: "900" },
+  templateActionSecondary: { alignItems: "center", borderRadius: 8, borderWidth: 1, flex: 1, paddingVertical: 8 },
+  templateActionSecondaryText: { fontSize: 10, fontWeight: "900" },
+  runtimeButton: { alignItems: "center", borderRadius: 10, marginTop: 10, paddingVertical: 10 },
+  runtimeButtonText: { color: "#FFFFFF", fontSize: 12, fontWeight: "900" },
+  pressed: { opacity: 0.75, transform: [{ scale: 0.99 }] },
 });

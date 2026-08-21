@@ -183,6 +183,13 @@
       "when": 1787326447416,
       "tag": "0025_absent_champions",
       "breakpoints": true
+    },
+    {
+      "idx": 26,
+      "version": "5",
+      "when": 1787328713182,
+      "tag": "0026_worried_scarecrow",
+      "breakpoints": true
     }
   ]
 }

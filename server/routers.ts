@@ -9,6 +9,7 @@ import { composeAgentSystemPrompt, promptTemplateKeyValues, promptTemplateLibrar
 import { runGovernedAgentRole } from "./agent-model-service";
 import { runPlannerAgentExecution } from "./agent-execution-service";
 import { agentModelRoles } from "../lib/agent-model-policy";
+import { buildTemplates } from "../lib/build-template-registry";
 
 const projectIdInput = z.object({ projectId: z.number().int().positive() });
 const taskStatus = z.enum(["pending", "queued", "running", "verifying", "completed", "failed", "debugging", "retrying", "cancelled"]);
@@ -210,6 +211,7 @@ export const appRouter = router({
   }),
   projectIntake: router({
     overview: protectedProcedure.input(projectIdInput).query(({ ctx, input }) => db.listProjectIntakeForOwner(ctx.user.id, input.projectId)),
+    buildTemplates: protectedProcedure.query(() => buildTemplates),
     importZip: protectedProcedure.input(projectIdInput.extend({
       fileName: z.string().trim().min(5).max(255),
       byteSize: z.number().int().positive().max(8 * 1024 * 1024),
@@ -228,6 +230,7 @@ export const appRouter = router({
     requestBuild: protectedProcedure.input(projectIdInput.extend({
       importId: z.number().int().positive().optional(),
       target: z.enum(["web", "android", "ios", "node", "docker", "custom"]),
+      templateKey: z.enum(["expo-mobile", "node-service", "docker-image"]),
       title: z.string().trim().min(3).max(255),
       summary: z.string().trim().min(8).max(4_000),
     })).mutation(({ ctx, input }) => db.createProjectBuildRequestForOwner(ctx.user.id, input)),

@@ -808,6 +808,7 @@ export const projectImports = mysqlTable("project_imports", {
   provider: varchar("provider", { length: 64 }),
   byteSize: int("byte_size"),
   summary: text("summary").notNull(),
+  inspectionSummary: text("inspection_summary"),
   createdAt: timestamp("created_at").defaultNow().notNull(),
 }, (table) => [
   index("project_imports_project_created_idx").on(table.projectId, table.createdAt),
@@ -820,6 +821,7 @@ export const projectBuildRequests = mysqlTable("project_build_requests", {
   importId: int("import_id").references(() => projectImports.id, { onDelete: "set null" }),
   requestedByUserId: int("requested_by_user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
   target: mysqlEnum("target", projectBuildTargetValues).notNull(),
+  templateKey: varchar("template_key", { length: 64 }),
   status: mysqlEnum("status", projectBuildRequestStatusValues).default("awaiting_approval").notNull(),
   title: varchar("title", { length: 255 }).notNull(),
   summary: text("summary").notNull(),

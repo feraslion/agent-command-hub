@@ -225,6 +225,13 @@ export const appRouter = router({
       entryPath: z.string().trim().min(1).max(512),
       paths: z.array(z.string().trim().min(1).max(512)).min(2).max(24),
     })).mutation(({ ctx, input }) => db.saveMultiFileBundleTemplateForProject(ctx.user.id, input)),
+    renameMultiFileTemplate: protectedProcedure.input(projectIdInput.extend({
+      templateId: z.number().int().positive(),
+      name: z.string().trim().min(2).max(80),
+    })).mutation(({ ctx, input }) => db.renameMultiFileBundleTemplateForProject(ctx.user.id, input)),
+    deleteMultiFileTemplate: protectedProcedure.input(projectIdInput.extend({
+      templateId: z.number().int().positive(),
+    })).mutation(({ ctx, input }) => db.deleteMultiFileBundleTemplateForProject(ctx.user.id, input)),
     requestExecution: protectedProcedure.input(projectIdInput.extend({ targetPath: z.string().trim().min(1).max(512), engineRunId: z.number().int().positive().optional() })).mutation(({ ctx, input }) => db.requestIsolatedRuntimeExecution(ctx.user.id, input)),
     requestMultiFileExecution: protectedProcedure.input(projectIdInput.extend({ entryPath: z.string().trim().min(1).max(512), paths: z.array(z.string().trim().min(1).max(512)).min(2).max(24), engineRunId: z.number().int().positive().optional() })).mutation(({ ctx, input }) => db.requestMultiFileRuntimeExecution(ctx.user.id, input)),
   }),

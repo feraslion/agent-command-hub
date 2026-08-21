@@ -33,6 +33,7 @@ const BLOCKED = [
   /\b(?:http|https|net|tls|dgram|cluster|worker_threads|vm|fs)\b/u,
   /\b(?:eval|Function)\s*\(/u,
 ];
+const MULTI_FILE_BLOCKED = BLOCKED.slice(1);
 
 function usage() {
   console.error("Usage: node runner/local-runner.mjs --server https://host --runner runner-key --token runner-token [--once] | --preflight | --scan-dir <directory> --project <projectId> [--scan-label <label>]");
@@ -86,7 +87,7 @@ function assertPayload(payload) {
     seen.add(filePath);
     const size = Buffer.byteLength(file.content, "utf8");
     totalBytes += size;
-    if (!file.content.trim() || size > 24_000 || BLOCKED.some((pattern) => pattern.test(file.content)) || /\b(?:require|import)\s*\(/u.test(file.content) || /\bimport\s+(?:type\s+)?(?:[^"']+?\s+from\s+)?["'](?!\.\.?\/)/u.test(file.content)) {
+    if (!file.content.trim() || size > 24_000 || MULTI_FILE_BLOCKED.some((pattern) => pattern.test(file.content)) || /\b(?:require|import)\s*\(/u.test(file.content) || /\bimport\s+(?:type\s+)?(?:[^"']+?\s+from\s+)?["'](?!\.\.?\/)/u.test(file.content)) {
       throw new Error("Runner rejected prohibited code in the multi-file bundle.");
     }
     return { path: filePath, content: file.content };

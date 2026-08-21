@@ -39,6 +39,7 @@ export const projectReportKindValues = ["delivery", "blocked"] as const;
 export const projectReportStatusValues = ["draft", "final"] as const;
 export const agentModelRoleValues = ["planner", "coder", "qa", "reviewer", "debugger"] as const;
 export const agentModelRunStatusValues = ["reserved", "running", "completed", "failed", "blocked", "cancelled"] as const;
+export const agentExecutionStatusValues = ["queued", "running", "awaiting_review", "completed", "failed", "blocked", "cancelled"] as const;
 export const modelCostReservationStatusValues = ["reserved", "settled", "released", "expired"] as const;
 export const repositoryLinkStatusValues = ["unlinked", "scanned", "stale"] as const;
 export const repositoryScanStatusValues = ["reported", "rejected"] as const;
@@ -573,6 +574,29 @@ export const agentModelRuns = mysqlTable("agent_model_runs", {
   index("agent_model_runs_project_created_idx").on(table.projectId, table.createdAt),
   index("agent_model_runs_task_role_created_idx").on(table.taskId, table.role, table.createdAt),
   index("agent_model_runs_context_idx").on(table.contextPackageId),
+]);
+
+export const agentExecutions = mysqlTable("agent_executions", {
+  id: int("id").autoincrement().primaryKey(),
+  projectId: int("project_id").notNull().references(() => projects.id, { onDelete: "cascade" }),
+  taskId: int("task_id").references(() => tasks.id, { onDelete: "set null" }),
+  contextPackageId: int("context_package_id").notNull().references(() => contextPackages.id, { onDelete: "restrict" }),
+  modelRunId: int("model_run_id").references(() => agentModelRuns.id, { onDelete: "set null" }),
+  workPlanId: int("work_plan_id").references(() => workPlans.id, { onDelete: "set null" }),
+  artifactId: int("artifact_id").references(() => artifacts.id, { onDelete: "set null" }),
+  role: mysqlEnum("role", agentModelRoleValues).notNull(),
+  status: mysqlEnum("status", agentExecutionStatusValues).default("queued").notNull(),
+  requestKey: varchar("request_key", { length: 180 }).notNull(),
+  outputSummary: text("output_summary"),
+  errorSummary: text("error_summary"),
+  startedAt: timestamp("started_at"),
+  completedAt: timestamp("completed_at"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().onUpdateNow().notNull(),
+}, (table) => [
+  index("agent_executions_project_created_idx").on(table.projectId, table.createdAt),
+  index("agent_executions_project_request_idx").on(table.projectId, table.requestKey),
+  index("agent_executions_context_status_idx").on(table.contextPackageId, table.status),
 ]);
 
 export const projectRepositoryLinks = mysqlTable("project_repository_links", {

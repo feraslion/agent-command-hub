@@ -7,6 +7,7 @@ import * as db from "./db";
 import { getDryWorkerLoopStatus } from "./dry-worker";
 import { composeAgentSystemPrompt, promptTemplateKeyValues, promptTemplateLibrary, promptTemplateLocaleValues } from "./prompt-library";
 import { runGovernedAgentRole } from "./agent-model-service";
+import { runPlannerAgentExecution } from "./agent-execution-service";
 import { agentModelRoles } from "../lib/agent-model-policy";
 
 const projectIdInput = z.object({ projectId: z.number().int().positive() });
@@ -109,6 +110,13 @@ export const appRouter = router({
       contextPackageId: z.number().int().positive(),
       role: z.enum(agentModelRoles),
     })).mutation(({ ctx, input }) => runGovernedAgentRole(ctx.user.id, input)),
+  }),
+  agentExecution: router({
+    list: protectedProcedure.input(projectIdInput.extend({ limit: z.number().int().min(1).max(100).optional() })).query(({ ctx, input }) => db.listAgentExecutionsForProject(ctx.user.id, input.projectId, input.limit ?? 50)),
+    runPlanner: protectedProcedure.input(projectIdInput.extend({
+      taskId: z.number().int().positive().optional(),
+      contextPackageId: z.number().int().positive(),
+    })).mutation(({ ctx, input }) => runPlannerAgentExecution(ctx.user.id, input)),
   }),
   agents: router({
     list: protectedProcedure.input(projectIdInput).query(({ ctx, input }) => db.listProjectAgents(ctx.user.id, input.projectId)),

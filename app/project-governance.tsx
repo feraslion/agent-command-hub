@@ -5,6 +5,7 @@ import { useLocalSearchParams, useRouter } from "expo-router";
 import { ScreenContainer } from "@/components/screen-container";
 import { useColors } from "@/hooks/use-colors";
 import { agentModelRoles, type AgentModelRole } from "@/lib/agent-model-policy";
+import { useConnectivity } from "@/lib/connectivity";
 import { trpc } from "@/lib/trpc";
 import { buildRedactedArtifactExport } from "@/lib/runtime-data-policy";
 
@@ -17,6 +18,7 @@ export default function ProjectGovernanceScreen() {
   const { projectId: projectIdParam, projectName } = useLocalSearchParams<{ projectId?: string; projectName?: string }>();
   const projectId = Number(projectIdParam);
   const colors = useColors();
+  const { isOnline } = useConnectivity();
   const utils = trpc.useUtils();
   const [section, setSection] = useState<SectionKey>("brief");
   const [brief, setBrief] = useState(blankBrief);
@@ -41,6 +43,7 @@ export default function ProjectGovernanceScreen() {
   const tasksQuery = trpc.tasks.list.useQuery({ projectId }, { enabled });
   const projectQuery = trpc.projects.get.useQuery({ projectId }, { enabled });
   const agentRunsQuery = trpc.agentModel.listRuns.useQuery({ projectId }, { enabled });
+  const agentExecutionsQuery = trpc.agentExecution.list.useQuery({ projectId }, { enabled });
   const invalidate = async () => {
     await Promise.all([
       utils.governance.get.invalidate({ projectId }),
@@ -48,6 +51,7 @@ export default function ProjectGovernanceScreen() {
       utils.events.list.invalidate({ projectId }),
       utils.projects.get.invalidate({ projectId }),
       utils.agentModel.listRuns.invalidate({ projectId }),
+      utils.agentExecution.list.invalidate({ projectId }),
     ]);
   };
 
@@ -68,6 +72,7 @@ export default function ProjectGovernanceScreen() {
   const timeline = governanceQuery.data?.timeline ?? [];
   const activePlan = plans.find((plan) => plan.status !== "superseded") ?? null;
   const agentRuns = agentRunsQuery.data ?? [];
+  const agentExecutions = agentExecutionsQuery.data ?? [];
 
   const saveBrief = trpc.governance.saveBrief.useMutation({ onSuccess: async () => { setNotice("تم حفظ موجز المشروع وتسجيله في الخط الزمني."); await invalidate(); } });
   const createPlan = trpc.governance.createPlan.useMutation({ onSuccess: async () => { setPlanTitle(""); setPlanSummary(""); setNotice("تم إنشاء خطة العمل. يمكنك الآن ربط المهام بها."); await invalidate(); } });
@@ -79,10 +84,11 @@ export default function ProjectGovernanceScreen() {
   const createContextPackage = trpc.governance.createContextPackage.useMutation({ onSuccess: async () => { setNotice("تم إنشاء حزمة سياق من مراجع منقحة فقط."); await invalidate(); } });
   const createReport = trpc.governance.createReport.useMutation({ onSuccess: async (_, input) => { setNotice(input.kind === "delivery" ? "تم إنشاء تقرير تسليم من الحالة الحية." : "تم إنشاء تقرير إيقاف من العوائق الحية."); await invalidate(); } });
   const runAgentRole = trpc.agentModel.run.useMutation({ onSuccess: async (_, input) => { setNotice(`اكتمل دور ${roleLabel(input.role)} بمخرج منظم محفوظ للمراجعة.`); await invalidate(); } });
-  const isPending = saveBrief.isPending || createPlan.isPending || createTask.isPending || createCriterion.isPending || addDependency.isPending || registerArtifact.isPending || createContextPackage.isPending || createReport.isPending || runAgentRole.isPending;
+  const runPlannerExecution = trpc.agentExecution.runPlanner.useMutation({ onSuccess: async (result) => { setNotice(result.reused ? "يوجد اقتراح Planner قائم بانتظار المراجعة لنفس حزمة السياق." : "حُفظ اقتراح Planner كخطة قيد المراجعة مع دليل؛ لم تُنشأ مهام أو تغييرات تلقائياً."); await invalidate(); } });
+  const isPending = saveBrief.isPending || createPlan.isPending || createTask.isPending || createCriterion.isPending || addDependency.isPending || registerArtifact.isPending || createContextPackage.isPending || createReport.isPending || runAgentRole.isPending || runPlannerExecution.isPending;
 
   const selectedTask = useMemo(() => tasks.find((task) => task.id === selectedTaskId) ?? null, [tasks, selectedTaskId]);
-  const error = governanceQuery.error ?? tasksQuery.error ?? projectQuery.error ?? agentRunsQuery.error;
+  const error = governanceQuery.error ?? tasksQuery.error ?? projectQuery.error ?? agentRunsQuery.error ?? agentExecutionsQuery.error;
 
   if (!enabled) return <GovernanceState title="مشروع غير صالح" copy="لم يتم تحديد مشروع صالح لفتح حوكمته." colors={colors} onBack={() => router.back()} />;
   if (governanceQuery.isLoading || tasksQuery.isLoading || projectQuery.isLoading) return <GovernanceState title="جارٍ تحميل الحوكمة" copy="يتم جلب الموجز والخطة والمهام من مصدر البيانات الحي." colors={colors} />;
@@ -112,12 +118,16 @@ export default function ProjectGovernanceScreen() {
         </View>
 
         {notice ? <View style={[styles.notice, { backgroundColor: colors.subtle, borderColor: colors.border }]}><Text style={[styles.noticeText, { color: colors.foreground }]}>{notice}</Text></View> : null}
-        {saveBrief.error || createPlan.error || createTask.error || createCriterion.error || addDependency.error || registerArtifact.error || createContextPackage.error || createReport.error || runAgentRole.error ? <View style={[styles.error, { backgroundColor: "#4A202A", borderColor: "#6C2C3B" }]}><Text style={styles.errorText}>تعذر حفظ التعديل. راجع الحقول والسياق وسقف الميزانية؛ ولا تسمح دورة الوكلاء بتطبيق أو تشغيل شيفرة مباشرة.</Text></View> : null}
+        {saveBrief.error || createPlan.error || createTask.error || createCriterion.error || addDependency.error || registerArtifact.error || createContextPackage.error || createReport.error || runAgentRole.error || runPlannerExecution.error ? <View style={[styles.error, { backgroundColor: "#4A202A", borderColor: "#6C2C3B" }]}><Text style={styles.errorText}>تعذر حفظ التعديل. راجع الحقول والسياق وسقف الميزانية؛ ولا تسمح دورة الوكلاء بتطبيق أو تشغيل شيفرة مباشرة.</Text></View> : null}
 
         {section === "brief" ? <BriefSection brief={brief} setBrief={setBrief} colors={colors} disabled={isPending} onSave={() => saveBrief.mutate({ projectId, ...brief })} /> : null}
         {section === "plan" ? <PlanSection colors={colors} plans={plans} activePlan={activePlan} tasks={tasks} criteria={criteria} dependencies={dependencies} criticalPathIds={criticalPathIds} selectedTaskId={selectedTaskId} dependsOnTaskId={dependsOnTaskId} planTitle={planTitle} planSummary={planSummary} newTaskTitle={newTaskTitle} criterionText={criterionText} pending={isPending} onSetPlanTitle={setPlanTitle} onSetPlanSummary={setPlanSummary} onCreatePlan={() => createPlan.mutate({ projectId, title: planTitle, summary: planSummary })} onSetNewTaskTitle={setNewTaskTitle} onCreateTask={() => activePlan && createTask.mutate({ projectId, workPlanId: activePlan.id, title: newTaskTitle, stage: "planning", priority: "medium" })} onSelectTask={setSelectedTaskId} onSetCriterionText={setCriterionText} onCreateCriterion={() => selectedTask && createCriterion.mutate({ projectId, taskId: selectedTask.id, criterion: criterionText })} onResolveCriterion={(criterionId) => resolveCriterion.mutate({ projectId, criterionId, status: "verified", evidenceNote: "تم التحقق من المالك." })} onSelectDependency={setDependsOnTaskId} onAddDependency={() => selectedTask && dependsOnTaskId && addDependency.mutate({ projectId, taskId: selectedTask.id, dependsOnTaskId })} /> : null}
         {section === "evidence" ? <EvidenceSection colors={colors} tasks={tasks} activePlan={activePlan} briefExists={Boolean(governanceQuery.data?.brief)} artifacts={artifacts} contextPackages={contextPackages} reports={reports} timeline={timeline} selectedTaskId={selectedTaskId} selectedArtifactIds={selectedArtifactIds} artifactName={artifactName} artifactKind={artifactKind} artifactReference={artifactReference} artifactSummary={artifactSummary} contextTitle={contextTitle} pending={isPending} onSetArtifactName={setArtifactName} onSetArtifactKind={setArtifactKind} onSetArtifactReference={setArtifactReference} onSetArtifactSummary={setArtifactSummary} onToggleArtifact={(id: number) => setSelectedArtifactIds((current) => current.includes(id) ? current.filter((value) => value !== id) : [...current, id].slice(0, 12))} onSetContextTitle={setContextTitle} onRegisterArtifact={() => registerArtifact.mutate({ projectId, taskId: selectedTaskId ?? undefined, name: artifactName, kind: artifactKind, reference: artifactReference, summary: artifactSummary || undefined })} onCreateContext={() => createContextPackage.mutate({ projectId, taskId: selectedTaskId ?? undefined, title: contextTitle, includeBrief: Boolean(governanceQuery.data?.brief), workPlanId: activePlan?.id, taskIds: selectedTaskId ? [selectedTaskId] : [], artifactIds: selectedArtifactIds, includeRecentEvents: true })} onExportArtifacts={exportArtifacts} onCreateReport={(kind: "delivery" | "blocked", finalize: boolean) => createReport.mutate({ projectId, kind, finalize })} /> : null}
-        {section === "agents" ? <AgentCycleSection colors={colors} tasks={tasks} contextPackages={contextPackages} runs={agentRuns} selectedTaskId={selectedTaskId} selectedContextPackageId={selectedContextPackageId} selectedRole={agentRole} pending={isPending} onSelectTask={setSelectedTaskId} onSelectContext={setSelectedContextPackageId} onSelectRole={setAgentRole} onRun={() => selectedContextPackageId && runAgentRole.mutate({ projectId, taskId: selectedTaskId ?? undefined, contextPackageId: selectedContextPackageId, role: agentRole })} /> : null}
+        {section === "agents" ? <AgentCycleSection colors={colors} tasks={tasks} contextPackages={contextPackages} runs={agentRuns} executions={agentExecutions} selectedTaskId={selectedTaskId} selectedContextPackageId={selectedContextPackageId} selectedRole={agentRole} online={isOnline} pending={isPending} onSelectTask={setSelectedTaskId} onSelectContext={setSelectedContextPackageId} onSelectRole={setAgentRole} onRun={() => {
+          if (!selectedContextPackageId || !isOnline) return;
+          if (agentRole === "planner") runPlannerExecution.mutate({ projectId, taskId: selectedTaskId ?? undefined, contextPackageId: selectedContextPackageId });
+          else runAgentRole.mutate({ projectId, taskId: selectedTaskId ?? undefined, contextPackageId: selectedContextPackageId, role: agentRole });
+        }} /> : null}
       </ScrollView>
     </ScreenContainer>
   );
@@ -178,9 +188,9 @@ function EvidenceSection({ colors, tasks, activePlan, briefExists, artifacts, co
     {reports.map((report) => <View key={report.id} style={[styles.itemCard, { backgroundColor: colors.surface, borderColor: colors.border }]}><Text style={[styles.itemTitle, { color: colors.foreground }]}>{report.kind === "delivery" ? "تقرير تسليم" : "تقرير إيقاف"} · {report.status === "final" ? "نهائي" : "مسودة"}</Text><Text style={[styles.itemCopy, { color: colors.muted }]}>{report.summary}</Text><Text style={[styles.itemCopy, { color: colors.muted }]}>{report.nextStep}</Text></View>)}
   </View>;
 }
-function AgentCycleSection({ colors, tasks, contextPackages, runs, selectedTaskId, selectedContextPackageId, selectedRole, pending, onSelectTask, onSelectContext, onSelectRole, onRun }: { colors: ReturnType<typeof useColors>; tasks: any[]; contextPackages: any[]; runs: any[]; selectedTaskId: number | null; selectedContextPackageId: number | null; selectedRole: AgentModelRole; pending: boolean; onSelectTask: (id: number) => void; onSelectContext: (id: number) => void; onSelectRole: (role: AgentModelRole) => void; onRun: () => void }) {
+function AgentCycleSection({ colors, tasks, contextPackages, runs, executions, selectedTaskId, selectedContextPackageId, selectedRole, online, pending, onSelectTask, onSelectContext, onSelectRole, onRun }: { colors: ReturnType<typeof useColors>; tasks: any[]; contextPackages: any[]; runs: any[]; executions: any[]; selectedTaskId: number | null; selectedContextPackageId: number | null; selectedRole: AgentModelRole; online: boolean; pending: boolean; onSelectTask: (id: number) => void; onSelectContext: (id: number) => void; onSelectRole: (role: AgentModelRole) => void; onRun: () => void }) {
   const needsTask = selectedRole === "debugger";
-  const canRun = Boolean(selectedContextPackageId) && (!needsTask || Boolean(selectedTaskId));
+  const canRun = online && Boolean(selectedContextPackageId) && (!needsTask || Boolean(selectedTaskId));
   return <View style={styles.section}>
     <SectionHeading title="دورة الوكلاء المحكومة" copy="كل تشغيل يحجز سقف تكلفة قبل الإرسال، ويعمل من حزمة سياق منقحة. لا يملك أي دور صلاحية تطبيق تعديل أو تشغيل شيفرة." colors={colors} />
     <TaskPicker label={needsTask ? "مهمة Debugger (إلزامية)" : "مهمة مرتبطة اختيارياً"} tasks={tasks} selectedTaskId={selectedTaskId} criticalPathIds={[]} onSelect={onSelectTask} colors={colors} />
@@ -190,7 +200,12 @@ function AgentCycleSection({ colors, tasks, contextPackages, runs, selectedTaskI
     <Text style={[styles.fieldLabel, { color: colors.foreground, marginTop: 16 }]}>الدور المطلوب</Text>
     <View style={styles.roleGrid}>{agentModelRoles.map((role) => <Pressable key={role} onPress={() => onSelectRole(role)} style={({ pressed }) => [styles.roleChoice, { backgroundColor: selectedRole === role ? colors.primary : colors.surface, borderColor: selectedRole === role ? colors.primary : colors.border }, pressed && styles.pressed]}><Text style={[styles.roleChoiceText, { color: selectedRole === role ? "#FFFFFF" : colors.foreground }]}>{roleLabel(role)}</Text></Pressable>)}</View>
     <View style={[styles.contextNotice, { backgroundColor: colors.subtle, borderColor: colors.border }]}><Text style={[styles.itemCopy, { color: colors.muted }]}>{roleAuthority(selectedRole)}</Text></View>
-    <PrimaryButton label={pending ? "جارٍ تشغيل الدور…" : `تشغيل ${roleLabel(selectedRole)} بمخرج JSON`} onPress={onRun} disabled={pending || !canRun} colors={colors} />
+    {!online ? <View style={[styles.contextNotice, { backgroundColor: colors.subtle, borderColor: colors.border }]}><Text style={[styles.itemCopy, { color: colors.warning }]}>وضع القراءة دون اتصال: لا يمكن تشغيل نموذج أو حجز تكلفة حتى يعود الاتصال.</Text></View> : null}
+    <PrimaryButton label={pending ? "جارٍ تشغيل الدور…" : selectedRole === "planner" ? "إنشاء اقتراح خطة عبر Planner" : `تشغيل ${roleLabel(selectedRole)} بمخرج JSON`} onPress={onRun} disabled={pending || !canRun} colors={colors} />
+    {selectedRole === "planner" ? <View style={[styles.contextNotice, { backgroundColor: colors.subtle, borderColor: colors.border }]}><Text style={[styles.itemCopy, { color: colors.muted }]}>يفسر تنفيذ Planner المخرج الصحيح إلى خطة قيد المراجعة ودليل مقترح فقط. لا ينشئ مهاماً ولا يطبق تعديل Workspace أو أداة.</Text></View> : null}
+    <SectionHeading title="تنفيذات Planner" copy="تظهر هنا دورة التنفيذ المحكومة وحالة اقتراح الخطة قبل أي اعتماد." colors={colors} />
+    {executions.filter((execution) => execution.role === "planner").map((execution) => <View key={execution.id} style={[styles.itemCard, { backgroundColor: colors.surface, borderColor: execution.status === "awaiting_review" ? colors.warning : colors.border }]}><Text style={[styles.itemTitle, { color: colors.foreground }]}>Planner · {plannerExecutionLabel(execution.status)}</Text><Text style={[styles.itemCopy, { color: colors.muted }]}>{execution.outputSummary || execution.errorSummary || "بانتظار بدء التنفيذ."}</Text><Text style={[styles.meta, { color: execution.status === "failed" ? colors.error : colors.primary }]}>تنفيذ #{execution.id}{execution.workPlanId ? ` · خطة #${execution.workPlanId}` : ""}{execution.artifactId ? ` · دليل #${execution.artifactId}` : ""}</Text></View>)}
+    {!executions.some((execution) => execution.role === "planner") ? <View style={[styles.contextNotice, { backgroundColor: colors.subtle, borderColor: colors.border }]}><Text style={[styles.itemCopy, { color: colors.muted }]}>لا يوجد تنفيذ Planner محفوظ بعد.</Text></View> : null}
     <SectionHeading title="المخرجات المحفوظة" copy="المخرجات المقترحة قابلة للمراجعة فقط؛ لا تُطبق تلقائياً في Workspace." colors={colors} />
     {runs.map((run) => <View key={run.id} style={[styles.itemCard, { backgroundColor: colors.surface, borderColor: colors.border }]}><Text style={[styles.itemTitle, { color: colors.foreground }]}>{roleLabel(run.role)} · {run.status}</Text><Text style={[styles.itemCopy, { color: colors.muted }]}>{run.outputSummary || run.errorSummary || run.inputSummary}</Text>{run.outputJson ? <Text style={[styles.modelOutput, { color: colors.foreground, borderColor: colors.border }]}>{safeModelOutput(run.outputJson)}</Text> : null}<Text style={[styles.meta, { color: colors.primary }]}>{run.model} · المحاولة {run.attemptNumber}</Text></View>)}
   </View>;
@@ -199,6 +214,7 @@ function safeReferenceCount(value: string) { try { const parsed = JSON.parse(val
 function safeModelOutput(value: string) { try { return JSON.stringify(JSON.parse(value), null, 2); } catch { return "المخرج غير قابل للعرض المنظم."; } }
 function roleLabel(role: AgentModelRole) { return ({ planner: "Planner", coder: "Coder", qa: "QA", reviewer: "Reviewer", debugger: "Debugger" } as const)[role]; }
 function roleAuthority(role: AgentModelRole) { return ({ planner: "ينتج خطة وأسئلة ومعايير قبول قابلة للمراجعة.", coder: "ينتج فرقاً مقترحاً فقط، بلا كتابة Workspace أو Git.", qa: "ينتج PASS أو FAIL وأدلة وفجوات؛ لا يغير حالة المهمة.", reviewer: "يراجع المخاطر والنطاق ويحدد طلب التعديل أو التحفظ.", debugger: "يقدم تشخيصاً وأصغر إصلاح مقترح بحد أقصى محاولتين لكل مهمة." } as const)[role]; }
+function plannerExecutionLabel(status: string) { return ({ queued: "في الطابور", running: "قيد التشغيل", awaiting_review: "بانتظار المراجعة", completed: "مكتمل", failed: "فشل", blocked: "محجوب", cancelled: "ملغى" } as Record<string, string>)[status] ?? status; }
 function TaskPicker({ label, tasks, selectedTaskId, criticalPathIds, onSelect, colors }: { label: string; tasks: any[]; selectedTaskId: number | null; criticalPathIds: number[]; onSelect: (id: number) => void; colors: ReturnType<typeof useColors> }) { return <View style={styles.picker}><Text style={[styles.fieldLabel, { color: colors.foreground }]}>{label}</Text>{tasks.map((task) => <Pressable key={task.id} onPress={() => onSelect(task.id)} style={({ pressed }) => [styles.taskChoice, { backgroundColor: selectedTaskId === task.id ? colors.subtle : colors.surface, borderColor: selectedTaskId === task.id ? colors.primary : colors.border }, pressed && styles.pressed]}><Text style={[styles.taskChoiceText, { color: colors.foreground }]}>{task.title}</Text>{criticalPathIds.includes(task.id) ? <Text style={[styles.critical, { color: colors.warning }]}>حرج</Text> : null}</Pressable>)}</View>; }
 function Segment({ label, active, onPress, colors }: { label: string; active: boolean; onPress: () => void; colors: ReturnType<typeof useColors> }) { return <Pressable onPress={onPress} style={({ pressed }) => [styles.segmentItem, active && { backgroundColor: colors.primary }, pressed && styles.pressed]}><Text style={[styles.segmentText, { color: active ? "#FFFFFF" : colors.muted }]}>{label}</Text></Pressable>; }
 function PrimaryButton({ label, onPress, disabled, colors }: { label: string; onPress: () => void; disabled: boolean; colors: ReturnType<typeof useColors> }) { return <Pressable disabled={disabled} onPress={onPress} style={({ pressed }) => [styles.primaryButton, { backgroundColor: colors.primary }, (disabled || pressed) && styles.disabled]}><Text style={styles.primaryText}>{label}</Text></Pressable>; }

@@ -3,6 +3,7 @@ import { and, desc, eq, inArray, lt, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/mysql2";
 import {
   agentPromptAssignments,
+  agentExecutions,
   agentModelRuns,
   agents,
   approvals,
@@ -52,6 +53,7 @@ import { broadcastRuntimeUpdate } from "./runtime-realtime";
 import { buildProjectReportDraft, estimateContextTokens, getCriticalPathTaskIds, normalizeContextSourceRefs, type ContextSourceRef, wouldCreateDependencyCycle } from "../lib/project-governance";
 import { modelRolePolicies, type AgentModelRole } from "../lib/agent-model-policy";
 import { validatePullRequestDraft, type PullRequestDraft } from "../lib/git-pr-policy";
+import type { PlannerInterpretation } from "../lib/planner-output-interpreter";
 
 let _db: ReturnType<typeof drizzle> | null = null;
 
@@ -1459,6 +1461,104 @@ export async function getProjectGovernanceForOwner(userId: number, projectId: nu
 export async function listAgentModelRunsForProject(userId: number, projectId: number, limit = 50) {
   const { db } = await requireOwnedProject(userId, projectId);
   return db.select().from(agentModelRuns).where(eq(agentModelRuns.projectId, projectId)).orderBy(desc(agentModelRuns.createdAt)).limit(limit);
+}
+
+export async function listAgentExecutionsForProject(userId: number, projectId: number, limit = 50) {
+  const { db } = await requireOwnedProject(userId, projectId);
+  return db.select().from(agentExecutions).where(eq(agentExecutions.projectId, projectId)).orderBy(desc(agentExecutions.createdAt)).limit(limit);
+}
+
+export async function createPlannerAgentExecutionForProject(userId: number, input: { projectId: number; taskId?: number; contextPackageId: number }) {
+  const { db } = await requireOwnedProject(userId, input.projectId);
+  await getAgentModelRunContextForProject(userId, input);
+  const requestKey = `planner:${input.contextPackageId}:${input.taskId ?? 0}`;
+  const [existing] = await db.select().from(agentExecutions).where(and(
+    eq(agentExecutions.projectId, input.projectId),
+    eq(agentExecutions.requestKey, requestKey),
+    inArray(agentExecutions.status, ["queued", "running", "awaiting_review"]),
+  )).orderBy(desc(agentExecutions.createdAt)).limit(1);
+  if (existing) return { execution: existing, reused: true as const };
+
+  const [result] = await db.insert(agentExecutions).values({
+    projectId: input.projectId,
+    taskId: input.taskId ?? null,
+    contextPackageId: input.contextPackageId,
+    role: "planner",
+    status: "queued",
+    requestKey,
+  });
+  const [execution] = await db.select().from(agentExecutions).where(eq(agentExecutions.id, Number(result.insertId))).limit(1);
+  await recordExecutionEvent(userId, input.projectId, {
+    taskId: input.taskId,
+    actor: "Planner Execution",
+    type: "PLANNER_EXECUTION_QUEUED",
+    label: "وُضع تنفيذ Planner للمراجعة",
+    detail: "سيحوّل المخرج المنظم إلى اقتراح خطة ودليل فقط؛ لن ينشئ مهاماً أو يطبق تغييرات.",
+  });
+  broadcastRuntimeUpdate(userId, "request");
+  return { execution, reused: false as const };
+}
+
+export async function markPlannerAgentExecutionRunningForProject(userId: number, input: { projectId: number; executionId: number }) {
+  const { db } = await requireOwnedProject(userId, input.projectId);
+  const [execution] = await db.select().from(agentExecutions).where(and(eq(agentExecutions.id, input.executionId), eq(agentExecutions.projectId, input.projectId))).limit(1);
+  if (!execution) throw new Error("Planner execution not found");
+  if (execution.status !== "queued") throw new Error("Planner execution is not available to start");
+  await db.update(agentExecutions).set({ status: "running", startedAt: new Date() }).where(eq(agentExecutions.id, execution.id));
+  return (await db.select().from(agentExecutions).where(eq(agentExecutions.id, execution.id)).limit(1))[0];
+}
+
+export async function interpretPlannerAgentExecutionForProject(userId: number, input: { projectId: number; executionId: number; modelRunId: number; interpretation: PlannerInterpretation }) {
+  const { db } = await requireOwnedProject(userId, input.projectId);
+  const [execution] = await db.select().from(agentExecutions).where(and(eq(agentExecutions.id, input.executionId), eq(agentExecutions.projectId, input.projectId))).limit(1);
+  if (!execution || execution.role !== "planner" || execution.status !== "running") throw new Error("Planner execution cannot be interpreted");
+  const [modelRun] = await db.select().from(agentModelRuns).where(and(eq(agentModelRuns.id, input.modelRunId), eq(agentModelRuns.projectId, input.projectId), eq(agentModelRuns.role, "planner"), eq(agentModelRuns.contextPackageId, execution.contextPackageId))).limit(1);
+  if (!modelRun || modelRun.status !== "completed") throw new Error("Planner model output is not available for interpretation");
+
+  const [planResult] = await db.insert(workPlans).values({
+    projectId: input.projectId,
+    title: input.interpretation.workPlan.title,
+    summary: input.interpretation.workPlan.summary,
+    status: "review",
+  });
+  const planId = Number(planResult.insertId);
+  const [artifactResult] = await db.insert(artifacts).values({
+    projectId: input.projectId,
+    taskId: execution.taskId,
+    name: input.interpretation.artifact.name,
+    kind: input.interpretation.artifact.kind,
+    storageKey: `agent-execution:${execution.id}:planner-output`,
+    summary: input.interpretation.artifact.summary,
+  });
+  const artifactId = Number(artifactResult.insertId);
+  await db.update(agentExecutions).set({
+    status: "awaiting_review",
+    modelRunId: modelRun.id,
+    workPlanId: planId,
+    artifactId,
+    outputSummary: input.interpretation.reviewNotice,
+    completedAt: new Date(),
+  }).where(eq(agentExecutions.id, execution.id));
+  await recordExecutionEvent(userId, input.projectId, {
+    taskId: execution.taskId ?? undefined,
+    actor: "Planner Output Interpreter",
+    type: "PLANNER_PROPOSAL_READY",
+    label: "اقتراح Planner جاهز للمراجعة",
+    detail: input.interpretation.reviewNotice,
+  });
+  broadcastRuntimeUpdate(userId, "request");
+  return (await db.select().from(agentExecutions).where(eq(agentExecutions.id, execution.id)).limit(1))[0];
+}
+
+export async function failPlannerAgentExecutionForProject(userId: number, input: { projectId: number; executionId: number; errorSummary: string }) {
+  const { db } = await requireOwnedProject(userId, input.projectId);
+  const [execution] = await db.select().from(agentExecutions).where(and(eq(agentExecutions.id, input.executionId), eq(agentExecutions.projectId, input.projectId))).limit(1);
+  if (!execution || !["queued", "running"].includes(execution.status)) throw new Error("Planner execution cannot be failed");
+  const summary = input.errorSummary.slice(0, 1_000);
+  await db.update(agentExecutions).set({ status: "failed", errorSummary: summary, completedAt: new Date() }).where(eq(agentExecutions.id, execution.id));
+  await recordExecutionEvent(userId, input.projectId, { taskId: execution.taskId ?? undefined, actor: "Planner Execution", type: "PLANNER_EXECUTION_FAILED", label: "فشل تنفيذ Planner", detail: summary });
+  broadcastRuntimeUpdate(userId, "request");
+  return (await db.select().from(agentExecutions).where(eq(agentExecutions.id, execution.id)).limit(1))[0];
 }
 
 export async function getAgentModelRunContextForProject(userId: number, input: { projectId: number; contextPackageId: number; taskId?: number }) {

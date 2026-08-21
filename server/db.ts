@@ -19,6 +19,7 @@ import {
   multiFileBundleTemplates,
   modelCostReservations,
   modelUsage,
+  plannerTaskProposals,
   projectBriefs,
   projectReports,
   projects,
@@ -54,6 +55,7 @@ import { buildProjectReportDraft, estimateContextTokens, getCriticalPathTaskIds,
 import { modelRolePolicies, type AgentModelRole } from "../lib/agent-model-policy";
 import { validatePullRequestDraft, type PullRequestDraft } from "../lib/git-pr-policy";
 import type { PlannerInterpretation } from "../lib/planner-output-interpreter";
+import { buildPlannerTaskProposals, parsePlannerProposalCriteria } from "../lib/planner-task-proposals";
 
 let _db: ReturnType<typeof drizzle> | null = null;
 
@@ -1301,7 +1303,109 @@ export async function setWorkPlanStatusForProject(userId: number, input: { proje
   await db.update(workPlans).set({ status: input.status }).where(eq(workPlans.id, plan.id));
   const [updated] = await db.select().from(workPlans).where(eq(workPlans.id, plan.id)).limit(1);
   await recordExecutionEvent(userId, input.projectId, { actor: "مالك المشروع", type: "WORK_PLAN_STATUS_CHANGED", label: "تغيرت حالة خطة العمل", detail: `${plan.title} → ${input.status}` });
+  if (input.status === "approved") {
+    await createPlannerTaskProposalsForApprovedPlan(userId, input.projectId, updated.id);
+  }
   return updated;
+}
+
+async function createPlannerTaskProposalsForApprovedPlan(userId: number, projectId: number, workPlanId: number) {
+  const { db } = await requireOwnedProject(userId, projectId);
+  const [execution] = await db.select().from(agentExecutions).where(and(
+    eq(agentExecutions.projectId, projectId),
+    eq(agentExecutions.workPlanId, workPlanId),
+    eq(agentExecutions.role, "planner"),
+    inArray(agentExecutions.status, ["awaiting_review", "completed"]),
+  )).orderBy(desc(agentExecutions.createdAt)).limit(1);
+  if (!execution) return [];
+  const existing = await db.select({ id: plannerTaskProposals.id }).from(plannerTaskProposals).where(eq(plannerTaskProposals.workPlanId, workPlanId)).limit(1);
+  if (existing.length) return listPlannerTaskProposalsForProject(userId, projectId, workPlanId);
+  const [plan] = await db.select().from(workPlans).where(and(eq(workPlans.id, workPlanId), eq(workPlans.projectId, projectId), eq(workPlans.status, "approved"))).limit(1);
+  if (!plan) return [];
+  const drafts = buildPlannerTaskProposals({ planTitle: plan.title, planSummary: plan.summary });
+  await db.insert(plannerTaskProposals).values(drafts.map((draft, index) => ({
+    projectId,
+    workPlanId,
+    executionId: execution.id,
+    position: index + 1,
+    title: draft.title,
+    description: draft.description,
+    stage: draft.stage,
+    priority: draft.priority,
+    acceptanceCriteriaJson: JSON.stringify(draft.acceptanceCriteria),
+    status: "draft" as const,
+  })));
+  await db.update(agentExecutions).set({ status: "completed" }).where(eq(agentExecutions.id, execution.id));
+  await recordExecutionEvent(userId, projectId, {
+    taskId: execution.taskId ?? undefined,
+    actor: "Planner Task Interpreter",
+    type: "PLANNER_TASK_PROPOSALS_CREATED",
+    label: "حُولت خطة Planner المعتمدة إلى مهام مقترحة",
+    detail: `${drafts.length} مهام قابلة للتحرير؛ لا توجد مهام فعلية قبل تطبيق المالك الصريح.`,
+  });
+  broadcastRuntimeUpdate(userId, "request");
+  return listPlannerTaskProposalsForProject(userId, projectId, workPlanId);
+}
+
+export async function listPlannerTaskProposalsForProject(userId: number, projectId: number, workPlanId?: number) {
+  const { db } = await requireOwnedProject(userId, projectId);
+  const rows = await db.select().from(plannerTaskProposals).where(workPlanId
+    ? and(eq(plannerTaskProposals.projectId, projectId), eq(plannerTaskProposals.workPlanId, workPlanId))
+    : eq(plannerTaskProposals.projectId, projectId),
+  ).orderBy(plannerTaskProposals.workPlanId, plannerTaskProposals.position);
+  return rows.map((row) => ({ ...row, acceptanceCriteria: parsePlannerProposalCriteria(row.acceptanceCriteriaJson) }));
+}
+
+export async function updatePlannerTaskProposalForProject(userId: number, input: { projectId: number; proposalId: number; title?: string; description?: string; stage?: string; priority?: "low" | "medium" | "high" | "critical"; acceptanceCriteria?: string[]; status?: "draft" | "discarded" }) {
+  const { db } = await requireOwnedProject(userId, input.projectId);
+  const [proposal] = await db.select().from(plannerTaskProposals).where(and(eq(plannerTaskProposals.id, input.proposalId), eq(plannerTaskProposals.projectId, input.projectId))).limit(1);
+  if (!proposal) throw new Error("Planner task proposal not found");
+  if (proposal.status === "applied") throw new Error("Applied planner task proposals cannot be edited");
+  const values: Record<string, unknown> = {};
+  if (input.title !== undefined) values.title = input.title;
+  if (input.description !== undefined) values.description = input.description;
+  if (input.stage !== undefined) values.stage = input.stage;
+  if (input.priority !== undefined) values.priority = input.priority;
+  if (input.acceptanceCriteria !== undefined) values.acceptanceCriteriaJson = JSON.stringify(input.acceptanceCriteria);
+  if (input.status !== undefined) values.status = input.status;
+  if (!Object.keys(values).length) throw new Error("Planner task proposal update is empty");
+  await db.update(plannerTaskProposals).set(values).where(eq(plannerTaskProposals.id, proposal.id));
+  const [updated] = await db.select().from(plannerTaskProposals).where(eq(plannerTaskProposals.id, proposal.id)).limit(1);
+  await recordExecutionEvent(userId, input.projectId, { actor: "مالك المشروع", type: "PLANNER_TASK_PROPOSAL_UPDATED", label: "تم تحديث مهمة Planner مقترحة", detail: updated.title });
+  return { ...updated, acceptanceCriteria: parsePlannerProposalCriteria(updated.acceptanceCriteriaJson) };
+}
+
+export async function applyPlannerTaskProposalsForProject(userId: number, input: { projectId: number; workPlanId: number; proposalIds: number[]; confirm: true }) {
+  const { db } = await requireOwnedProject(userId, input.projectId);
+  const [plan] = await db.select().from(workPlans).where(and(eq(workPlans.id, input.workPlanId), eq(workPlans.projectId, input.projectId), eq(workPlans.status, "approved"))).limit(1);
+  if (!plan) throw new Error("Only an approved work plan can create project tasks");
+  const distinctIds = [...new Set(input.proposalIds)];
+  const proposals = await db.select().from(plannerTaskProposals).where(and(
+    eq(plannerTaskProposals.projectId, input.projectId),
+    eq(plannerTaskProposals.workPlanId, input.workPlanId),
+    inArray(plannerTaskProposals.id, distinctIds),
+  )).orderBy(plannerTaskProposals.position);
+  if (proposals.length !== distinctIds.length || proposals.some((proposal) => proposal.status !== "draft")) throw new Error("Only selected draft proposals from this approved plan can be applied");
+
+  const createdTasks = [];
+  for (const proposal of proposals) {
+    const task = await createTaskForProject(userId, {
+      projectId: input.projectId,
+      workPlanId: input.workPlanId,
+      title: proposal.title,
+      description: proposal.description,
+      stage: proposal.stage,
+      priority: proposal.priority,
+    });
+    for (const criterion of parsePlannerProposalCriteria(proposal.acceptanceCriteriaJson)) {
+      await createTaskAcceptanceCriterionForProject(userId, { projectId: input.projectId, taskId: task.id, criterion });
+    }
+    await db.update(plannerTaskProposals).set({ status: "applied", taskId: task.id }).where(eq(plannerTaskProposals.id, proposal.id));
+    createdTasks.push(task);
+  }
+  await recordExecutionEvent(userId, input.projectId, { actor: "مالك المشروع", type: "PLANNER_TASK_PROPOSALS_APPLIED", label: "تم إنشاء مهام من مقترحات Planner", detail: `${createdTasks.length} مهام أُنشئت بعد تأكيد صريح من المالك.` });
+  broadcastRuntimeUpdate(userId, "request");
+  return createdTasks;
 }
 
 export async function listTaskAcceptanceCriteriaForProject(userId: number, projectId: number) {

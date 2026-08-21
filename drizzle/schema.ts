@@ -40,6 +40,7 @@ export const projectReportStatusValues = ["draft", "final"] as const;
 export const agentModelRoleValues = ["planner", "coder", "qa", "reviewer", "debugger"] as const;
 export const agentModelRunStatusValues = ["reserved", "running", "completed", "failed", "blocked", "cancelled"] as const;
 export const agentExecutionStatusValues = ["queued", "running", "awaiting_review", "completed", "failed", "blocked", "cancelled"] as const;
+export const plannerTaskProposalStatusValues = ["draft", "applied", "discarded"] as const;
 export const modelCostReservationStatusValues = ["reserved", "settled", "released", "expired"] as const;
 export const repositoryLinkStatusValues = ["unlinked", "scanned", "stale"] as const;
 export const repositoryScanStatusValues = ["reported", "rejected"] as const;
@@ -597,6 +598,27 @@ export const agentExecutions = mysqlTable("agent_executions", {
   index("agent_executions_project_created_idx").on(table.projectId, table.createdAt),
   index("agent_executions_project_request_idx").on(table.projectId, table.requestKey),
   index("agent_executions_context_status_idx").on(table.contextPackageId, table.status),
+]);
+
+export const plannerTaskProposals = mysqlTable("planner_task_proposals", {
+  id: int("id").autoincrement().primaryKey(),
+  projectId: int("project_id").notNull().references(() => projects.id, { onDelete: "cascade" }),
+  workPlanId: int("work_plan_id").notNull().references(() => workPlans.id, { onDelete: "cascade" }),
+  executionId: int("execution_id").notNull().references(() => agentExecutions.id, { onDelete: "cascade" }),
+  taskId: int("task_id").references(() => tasks.id, { onDelete: "set null" }),
+  position: int("position").notNull(),
+  title: varchar("title", { length: 255 }).notNull(),
+  description: text("description").notNull(),
+  stage: varchar("stage", { length: 128 }).default("planning").notNull(),
+  priority: mysqlEnum("priority", ["low", "medium", "high", "critical"]).default("medium").notNull(),
+  acceptanceCriteriaJson: text("acceptance_criteria_json").notNull(),
+  status: mysqlEnum("status", plannerTaskProposalStatusValues).default("draft").notNull(),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().onUpdateNow().notNull(),
+}, (table) => [
+  uniqueIndex("planner_task_proposals_plan_position_unique").on(table.workPlanId, table.position),
+  index("planner_task_proposals_project_status_idx").on(table.projectId, table.status),
+  index("planner_task_proposals_execution_idx").on(table.executionId),
 ]);
 
 export const projectRepositoryLinks = mysqlTable("project_repository_links", {

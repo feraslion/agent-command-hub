@@ -118,6 +118,23 @@ export const appRouter = router({
       contextPackageId: z.number().int().positive(),
     })).mutation(({ ctx, input }) => runPlannerAgentExecution(ctx.user.id, input)),
   }),
+  plannerTasks: router({
+    list: protectedProcedure.input(projectIdInput.extend({ workPlanId: z.number().int().positive().optional() })).query(({ ctx, input }) => db.listPlannerTaskProposalsForProject(ctx.user.id, input.projectId, input.workPlanId)),
+    update: protectedProcedure.input(projectIdInput.extend({
+      proposalId: z.number().int().positive(),
+      title: z.string().trim().min(2).max(255).optional(),
+      description: z.string().trim().min(2).max(4_000).optional(),
+      stage: z.string().trim().min(2).max(128).optional(),
+      priority: z.enum(["low", "medium", "high", "critical"]).optional(),
+      acceptanceCriteria: z.array(z.string().trim().min(2).max(1_000)).min(1).max(12).optional(),
+      status: z.enum(["draft", "discarded"]).optional(),
+    })).mutation(({ ctx, input }) => db.updatePlannerTaskProposalForProject(ctx.user.id, input)),
+    createTasks: protectedProcedure.input(projectIdInput.extend({
+      workPlanId: z.number().int().positive(),
+      proposalIds: z.array(z.number().int().positive()).min(1).max(12),
+      confirm: z.literal(true),
+    })).mutation(({ ctx, input }) => db.applyPlannerTaskProposalsForProject(ctx.user.id, input)),
+  }),
   agents: router({
     list: protectedProcedure.input(projectIdInput).query(({ ctx, input }) => db.listProjectAgents(ctx.user.id, input.projectId)),
     create: protectedProcedure.input(z.object({

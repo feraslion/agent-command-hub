@@ -73,7 +73,8 @@ import { validateBuildRequest, validateRepositoryReference, validateZipArchive }
 import { verifyPublicRepository } from "../lib/repository-existence-check";
 import { getBuildTemplate } from "../lib/build-template-registry";
 import { inspectZipStructure, summarizeZipInspection } from "../lib/zip-structure-inspector";
-import { storagePut } from "./storage";
+import { scanProjectArchiveSensitiveData, summarizeSensitiveDataScan } from "../lib/project-sensitive-data-scanner";
+import { storageGetSignedUrl, storagePut } from "./storage";
 
 let _db: ReturnType<typeof drizzle> | null = null;
 
@@ -1812,12 +1813,30 @@ export async function importProjectZipForOwner(userId: number, input: { projectI
   const { db } = await requireOwnedProject(userId, input.projectId);
   const inspection = inspectZipStructure(input.bytes);
   const inspectionSummary = summarizeZipInspection(inspection);
+  const securityScan = scanProjectArchiveSensitiveData(input.bytes);
+  const securityScanSummary = summarizeSensitiveDataScan(securityScan);
   const stored = await storagePut(`project-imports/${userId}/${input.projectId}/${validated.safeName}`, input.bytes, "application/zip");
-  const summary = `أرشيف ZIP محفوظ للمراجعة فقط (${Math.ceil(validated.byteSize / 1024)}KB). ${inspectionSummary}`;
-  const [result] = await db.insert(projectImports).values({ projectId: input.projectId, ownerId: userId, source: "zip", status: "received", displayName: validated.safeName, storageKey: stored.key, byteSize: validated.byteSize, summary, inspectionSummary });
+  const summary = `أرشيف ZIP محفوظ للمراجعة فقط (${Math.ceil(validated.byteSize / 1024)}KB). ${inspectionSummary} فحص الأمان: ${securityScan.status === "clean" ? "سليم" : securityScan.status === "blocked" ? "محجوب" : "يتطلب مراجعة"}.`;
+  const [result] = await db.insert(projectImports).values({ projectId: input.projectId, ownerId: userId, source: "zip", status: "received", displayName: validated.safeName, storageKey: stored.key, byteSize: validated.byteSize, summary, inspectionSummary, securityScanStatus: securityScan.status, securityScanSummary });
   await db.insert(artifacts).values({ projectId: input.projectId, name: validated.safeName, kind: "project_archive", storageKey: stored.key, summary });
+  await recordExecutionEvent(userId, input.projectId, { actor: "بوابة أمان المشروع", type: "PROJECT_ARCHIVE_SENSITIVE_DATA_SCAN", label: "اكتمل فحص أسرار الأرشيف", detail: `النتيجة ${securityScan.status}; الملفات المفحوصة ${securityScan.scannedFiles}; النتائج المنقحة ${securityScan.findings.length}. لم تحفظ قيم سرية.` });
   await recordExecutionEvent(userId, input.projectId, { actor: "مالك المشروع", type: "PROJECT_ARCHIVE_RECEIVED", label: "تم حفظ أرشيف مشروع", detail: summary });
   return (await db.select().from(projectImports).where(eq(projectImports.id, Number(result.insertId))).limit(1))[0];
+}
+
+export async function rescanProjectZipForOwner(userId: number, input: { projectId: number; importId: number }) {
+  const { db } = await requireOwnedProject(userId, input.projectId);
+  const [source] = await db.select().from(projectImports).where(and(eq(projectImports.id, input.importId), eq(projectImports.projectId, input.projectId), eq(projectImports.ownerId, userId))).limit(1);
+  if (!source || source.source !== "zip" || !source.storageKey || !source.byteSize) throw new Error("لا يتوفر أرشيف ZIP صالح لإعادة الفحص.");
+  const response = await fetch(await storageGetSignedUrl(source.storageKey), { redirect: "error" });
+  if (!response.ok) throw new Error("تعذر الوصول إلى الأرشيف المخزن لإعادة الفحص.");
+  const bytes = new Uint8Array(await response.arrayBuffer());
+  validateZipArchive({ fileName: source.displayName, byteSize: source.byteSize, bytes });
+  const scan = scanProjectArchiveSensitiveData(bytes);
+  const securityScanSummary = summarizeSensitiveDataScan(scan);
+  await db.update(projectImports).set({ securityScanStatus: scan.status, securityScanSummary }).where(eq(projectImports.id, source.id));
+  await recordExecutionEvent(userId, input.projectId, { actor: "بوابة أمان المشروع", type: "PROJECT_ARCHIVE_SENSITIVE_DATA_RESCAN", label: "أعيد فحص أسرار الأرشيف", detail: `النتيجة ${scan.status}; الملفات المفحوصة ${scan.scannedFiles}; النتائج المنقحة ${scan.findings.length}. لم تحفظ قيم سرية.` });
+  return (await db.select().from(projectImports).where(eq(projectImports.id, source.id)).limit(1))[0];
 }
 
 export async function registerProjectRepositoryForOwner(userId: number, input: { projectId: number; remoteUrl: string; repositoryName?: string; defaultBranch: string }) {
@@ -1848,8 +1867,10 @@ export async function createProjectBuildRequestForOwner(userId: number, input: {
   if (!template.targets.includes(build.target)) throw new Error("هدف البناء لا يتوافق مع القالب المختار.");
   const { db } = await requireOwnedProject(userId, input.projectId);
   if (input.importId) {
-    const [source] = await db.select({ id: projectImports.id }).from(projectImports).where(and(eq(projectImports.id, input.importId), eq(projectImports.projectId, input.projectId))).limit(1);
+    const [source] = await db.select({ id: projectImports.id, securityScanStatus: projectImports.securityScanStatus }).from(projectImports).where(and(eq(projectImports.id, input.importId), eq(projectImports.projectId, input.projectId))).limit(1);
     if (!source) throw new Error("مصدر المشروع غير موجود ضمن هذا المشروع.");
+    if (source.securityScanStatus === "pending") throw new Error("لا يمكن طلب البناء قبل فحص أسرار وبيانات المصدر.");
+    if (source.securityScanStatus === "blocked") throw new Error("حُجب طلب البناء لأن فحص المصدر عثر على أسرار أو بيانات حساسة عالية الخطورة.");
   }
   const [approvalResult] = await db.insert(approvals).values({ projectId: input.projectId, requestedBy: "منصة استيراد المشروع", title: `اعتماد طلب بناء: ${build.title}`, detail: `قالب البناء: ${template.name}. طلب تخطيط لهدف ${build.target}. لا ينفذ هذا الإصدار أي بناء أو رفع؛ الاعتماد يسجل قراراً فقط. ${build.summary}`, impact: `يتطلب بيئة بناء محلية مقيدة بعد إثبات Runner. الفحوص المتوقعة: ${template.preflight.join("، ")}.`, level: "approval" });
   const approvalId = Number(approvalResult.insertId);

@@ -217,6 +217,9 @@ export const appRouter = router({
       byteSize: z.number().int().positive().max(8 * 1024 * 1024),
       base64: z.string().min(4).max(12_000_000),
     })).mutation(({ ctx, input }) => db.importProjectZipForOwner(ctx.user.id, { ...input, bytes: Buffer.from(input.base64, "base64") })),
+    scanZip: protectedProcedure.input(projectIdInput.extend({
+      importId: z.number().int().positive(),
+    })).mutation(({ ctx, input }) => db.rescanProjectZipForOwner(ctx.user.id, input)),
     registerRepository: protectedProcedure.input(projectIdInput.extend({
       remoteUrl: z.string().trim().url().max(512),
       repositoryName: z.string().trim().max(255).optional(),

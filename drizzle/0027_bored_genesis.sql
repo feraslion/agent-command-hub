@@ -1,0 +1,2 @@
+ALTER TABLE `project_imports` ADD `security_scan_status` enum('pending','clean','review_required','blocked') DEFAULT 'pending' NOT NULL;--> statement-breakpoint
+ALTER TABLE `project_imports` ADD `security_scan_summary` text;

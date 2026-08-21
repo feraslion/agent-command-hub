@@ -809,6 +809,8 @@ export const projectImports = mysqlTable("project_imports", {
   byteSize: int("byte_size"),
   summary: text("summary").notNull(),
   inspectionSummary: text("inspection_summary"),
+  securityScanStatus: mysqlEnum("security_scan_status", ["pending", "clean", "review_required", "blocked"]).default("pending").notNull(),
+  securityScanSummary: text("security_scan_summary"),
   createdAt: timestamp("created_at").defaultNow().notNull(),
 }, (table) => [
   index("project_imports_project_created_idx").on(table.projectId, table.createdAt),

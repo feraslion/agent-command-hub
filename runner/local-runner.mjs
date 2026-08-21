@@ -141,9 +141,29 @@ async function assertDockerReady() {
   console.log(`[runner] Docker ready (server ${daemon.stdout.trim()}, images verified).`);
 }
 
+async function createExecutionWorkspace() {
+  const containerRoot = process.env.AGENTHUB_RUNNER_WORKSPACE_ROOT;
+  const hostRoot = process.env.AGENTHUB_RUNNER_HOST_WORKSPACE_ROOT;
+  if (Boolean(containerRoot) !== Boolean(hostRoot)) {
+    throw new Error("Runner workspace mapping requires both container and host workspace roots.");
+  }
+  if (!containerRoot || !hostRoot) {
+    const workspace = await mkdtemp(path.join(tmpdir(), "agenthub-runner-"));
+    return { workspace, dockerWorkspace: workspace };
+  }
+  if (!path.isAbsolute(containerRoot) || !path.isAbsolute(hostRoot)) {
+    throw new Error("Runner workspace roots must be absolute paths.");
+  }
+  await mkdir(containerRoot, { recursive: true, mode: 0o700 });
+  const name = `agenthub-runner-${randomUUID()}`;
+  const workspace = path.join(containerRoot, name);
+  await mkdir(workspace, { recursive: false, mode: 0o700 });
+  return { workspace, dockerWorkspace: path.join(hostRoot, name) };
+}
+
 async function execute(payload) {
   const { normalized: targetPath, profile, files } = assertPayload(payload);
-  const workspace = await mkdtemp(path.join(tmpdir(), "agenthub-runner-"));
+  const { workspace, dockerWorkspace } = await createExecutionWorkspace();
   const containerName = `agenthub-${payload.requestId}-${randomUUID().slice(0, 8)}`;
   const startedAt = Date.now();
 
@@ -173,7 +193,7 @@ async function execute(payload) {
       "--cpus", profile === "typescript_multi_file" ? "0.75" : "0.5",
       "--user", "1000:1000",
       "--workdir", "/workspace",
-      "--mount", `type=bind,src=${workspace},dst=/workspace,readonly`,
+      "--mount", `type=bind,src=${dockerWorkspace},dst=/workspace,readonly`,
       profile === "typescript_lockfile" ? TYPESCRIPT_IMAGE : NODE_IMAGE,
       ...runtimeCommand,
     ];

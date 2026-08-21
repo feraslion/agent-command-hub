@@ -111,10 +111,11 @@ export default function ProjectGovernanceScreen() {
           <View style={styles.headerTitle}><Text style={[styles.eyebrow, { color: colors.primary }]}>قرار · خطة · دليل</Text><Text style={[styles.title, { color: colors.foreground }]}>{title}</Text></View>
         </View>
 
-        <View style={[styles.summaryCard, { backgroundColor: colors.surface, borderColor: colors.border }]}>
+        <View style={[styles.summaryCard, { backgroundColor: colors.surface, borderColor: colors.border }]}> 
           <Text style={[styles.summaryTitle, { color: colors.foreground }]}>حوكمة المشروع</Text>
           <Text style={[styles.summaryCopy, { color: colors.muted }]}>لا يبدأ التفويض من واجهة هذه الشاشة. هي تحفظ موجزاً وخطة ومعايير تحقق ودلائل قابلة للمراجعة.</Text>
           <View style={styles.miniStats}><MiniStat label="المهام" value={String(tasks.length)} colors={colors} /><MiniStat label="المعايير" value={String(criteria.length)} colors={colors} /><MiniStat label="المسار الحرج" value={String(criticalPathIds.length)} colors={colors} /></View>
+          <PrimaryButton label="فتح البحث والتشاور" onPress={() => router.push({ pathname: "/research-consultation" as any, params: { projectId: String(projectId), projectName: title } })} disabled={false} colors={colors} />
         </View>
 
         <View style={[styles.segment, { backgroundColor: colors.surface, borderColor: colors.border }]}>

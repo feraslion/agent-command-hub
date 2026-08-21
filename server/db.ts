@@ -10,6 +10,12 @@ import {
   artifacts,
   contextPackages,
   costEntries,
+  councilOpinions,
+  decisions,
+  engineConnections,
+  engineSessions,
+  evidenceClaims,
+  evidenceSources,
   executionCommands,
   executionEvents,
   executionPlans,
@@ -22,6 +28,9 @@ import {
   plannerTaskProposals,
   projectBriefs,
   projectReports,
+  researchCampaigns,
+  researchQuestions,
+  researchSyntheses,
   projects,
   projectRepositoryLinks,
   repositoryScans,
@@ -56,6 +65,8 @@ import { modelRolePolicies, type AgentModelRole } from "../lib/agent-model-polic
 import { validatePullRequestDraft, type PullRequestDraft } from "../lib/git-pr-policy";
 import type { PlannerInterpretation } from "../lib/planner-output-interpreter";
 import { buildPlannerTaskProposals, parsePlannerProposalCriteria } from "../lib/planner-task-proposals";
+import { assertEnginePlanningOnly, defaultEngineCapabilities, evidenceInstructionRisk, trustTierForSourceType, type EngineConnectionKind, type ResearchSourceType } from "../lib/research-fabric-policy";
+import { buildResearchSynthesis } from "../lib/research-synthesis";
 
 let _db: ReturnType<typeof drizzle> | null = null;
 
@@ -1894,6 +1905,164 @@ export async function recordProjectCost(userId: number, input: { projectId: numb
     detail: `${input.model}: $${input.amount.toFixed(4)}`,
   });
   return (await db.select().from(costEntries).where(eq(costEntries.id, costId)).limit(1))[0];
+}
+
+async function requireOwnedResearchCampaign(userId: number, projectId: number, campaignId: number) {
+  const { db } = await requireOwnedProject(userId, projectId);
+  const [campaign] = await db.select().from(researchCampaigns).where(and(eq(researchCampaigns.id, campaignId), eq(researchCampaigns.projectId, projectId))).limit(1);
+  if (!campaign) throw new Error("Research campaign not found for this project");
+  return { db, campaign };
+}
+
+export async function listResearchCampaignsForProject(userId: number, projectId: number) {
+  const { db } = await requireOwnedProject(userId, projectId);
+  return db.select().from(researchCampaigns).where(eq(researchCampaigns.projectId, projectId)).orderBy(desc(researchCampaigns.updatedAt));
+}
+
+export async function createResearchCampaignForProject(userId: number, input: { projectId: number; title: string; command: string; maxSources: number; maxQuestions: number; maxRounds: number; decisionLevel: "auto" | "review" | "approval"; questions: { question: string; category: string; priority: number }[] }) {
+  const { db } = await requireOwnedProject(userId, input.projectId);
+  if (!input.questions.length || input.questions.length > input.maxQuestions) throw new Error("Research questions must fit within the campaign budget");
+  const [result] = await db.insert(researchCampaigns).values({
+    projectId: input.projectId,
+    title: input.title,
+    command: input.command,
+    status: "researching",
+    maxSources: input.maxSources,
+    maxQuestions: input.maxQuestions,
+    maxRounds: input.maxRounds,
+    decisionLevel: input.decisionLevel,
+  });
+  const campaignId = Number(result.insertId);
+  await db.insert(researchQuestions).values(input.questions.map((question) => ({ campaignId, question: question.question, category: question.category, priority: question.priority, status: "pending" as const })));
+  await recordExecutionEvent(userId, input.projectId, { actor: "Research Orchestrator", type: "RESEARCH_CAMPAIGN_CREATED", label: "أنشئت حملة بحث مقيدة", detail: `${input.questions.length} أسئلة؛ حد المصادر ${input.maxSources}، ولا توجد موصلات تنفيذ أو بحث خارجي تلقائي.` });
+  return getResearchCampaignDetailForProject(userId, input.projectId, campaignId);
+}
+
+function assertSafeEvidenceUrl(url?: string) {
+  if (!url) return;
+  let parsed: URL;
+  try { parsed = new URL(url); } catch { throw new Error("Evidence URL must be a valid absolute HTTPS URL"); }
+  if (parsed.protocol !== "https:") throw new Error("Evidence URL must use HTTPS");
+  const host = parsed.hostname.toLowerCase();
+  if (host === "localhost" || host.endsWith(".local") || /^127\.|^10\.|^192\.168\.|^169\.254\.|^172\.(1[6-9]|2\d|3[0-1])\./.test(host)) throw new Error("Evidence URL cannot target private or local network addresses");
+}
+
+export async function addEvidenceSourceForProject(userId: number, input: { projectId: number; campaignId: number; questionId?: number; sourceType: ResearchSourceType; url?: string; title: string; author?: string; publishedLabel?: string; contentHash?: string; redactedSummary: string }) {
+  const { db, campaign } = await requireOwnedResearchCampaign(userId, input.projectId, input.campaignId);
+  assertSafeEvidenceUrl(input.url);
+  const [{ count }] = await db.select({ count: sql<number>`count(*)` }).from(evidenceSources).where(eq(evidenceSources.campaignId, campaign.id));
+  if (Number(count) >= campaign.maxSources) throw new Error("Research campaign source budget has been reached");
+  if (input.questionId) {
+    const [question] = await db.select({ id: researchQuestions.id }).from(researchQuestions).where(and(eq(researchQuestions.id, input.questionId), eq(researchQuestions.campaignId, campaign.id))).limit(1);
+    if (!question) throw new Error("Research question not found for this campaign");
+  }
+  const [result] = await db.insert(evidenceSources).values({
+    projectId: input.projectId,
+    campaignId: campaign.id,
+    questionId: input.questionId ?? null,
+    sourceType: input.sourceType,
+    url: input.url ?? null,
+    title: input.title,
+    author: input.author ?? null,
+    publishedLabel: input.publishedLabel ?? null,
+    contentHash: input.contentHash ?? null,
+    trustTier: trustTierForSourceType(input.sourceType),
+    redactedSummary: input.redactedSummary,
+    instructionRiskDetected: evidenceInstructionRisk(`${input.title}\n${input.redactedSummary}`),
+  });
+  const sourceId = Number(result.insertId);
+  await recordExecutionEvent(userId, input.projectId, { actor: "Evidence Gateway", type: "EVIDENCE_SOURCE_RECORDED", label: "سُجل مصدر بحث منقح", detail: `${input.sourceType} · ${input.title}` });
+  return (await db.select().from(evidenceSources).where(eq(evidenceSources.id, sourceId)).limit(1))[0];
+}
+
+export async function addEvidenceClaimForProject(userId: number, input: { projectId: number; campaignId: number; sourceId: number; claim: string; evidenceExcerpt: string; relevance: number; conflictGroup?: string; status?: "active" | "conflicted" | "rejected" }) {
+  const { db, campaign } = await requireOwnedResearchCampaign(userId, input.projectId, input.campaignId);
+  const [source] = await db.select().from(evidenceSources).where(and(eq(evidenceSources.id, input.sourceId), eq(evidenceSources.campaignId, campaign.id))).limit(1);
+  if (!source) throw new Error("Evidence source not found for this campaign");
+  const [result] = await db.insert(evidenceClaims).values({ campaignId: campaign.id, sourceId: source.id, claim: input.claim, evidenceExcerpt: input.evidenceExcerpt, relevance: input.relevance, reliability: source.trustTier, conflictGroup: input.conflictGroup ?? null, status: input.status ?? "active" });
+  const claimId = Number(result.insertId);
+  return (await db.select().from(evidenceClaims).where(eq(evidenceClaims.id, claimId)).limit(1))[0];
+}
+
+export async function synthesizeResearchCampaignForProject(userId: number, input: { projectId: number; campaignId: number }) {
+  const { db, campaign } = await requireOwnedResearchCampaign(userId, input.projectId, input.campaignId);
+  const [claims, questions] = await Promise.all([
+    db.select().from(evidenceClaims).where(eq(evidenceClaims.campaignId, campaign.id)),
+    db.select().from(researchQuestions).where(and(eq(researchQuestions.campaignId, campaign.id), eq(researchQuestions.status, "pending"))),
+  ]);
+  const synthesis = buildResearchSynthesis({ claims, unansweredQuestions: questions.map((question) => question.question) });
+  const existing = await db.select({ id: researchSyntheses.id }).from(researchSyntheses).where(eq(researchSyntheses.campaignId, campaign.id)).limit(1);
+  if (existing[0]) {
+    await db.update(researchSyntheses).set({ summary: synthesis.summary, consensus: synthesis.consensus, conflicts: synthesis.conflicts, unknowns: synthesis.unknowns, optionsJson: JSON.stringify(synthesis.options), status: "review" }).where(eq(researchSyntheses.id, existing[0].id));
+  } else {
+    await db.insert(researchSyntheses).values({ campaignId: campaign.id, summary: synthesis.summary, consensus: synthesis.consensus, conflicts: synthesis.conflicts, unknowns: synthesis.unknowns, optionsJson: JSON.stringify(synthesis.options), status: "review" });
+  }
+  await db.update(researchCampaigns).set({ status: "awaiting_decision" }).where(eq(researchCampaigns.id, campaign.id));
+  await recordExecutionEvent(userId, input.projectId, { actor: "Knowledge Synthesizer", type: "RESEARCH_SYNTHESIS_CREATED", label: "تجميع الأدلة بانتظار القرار", detail: synthesis.summary });
+  return getResearchCampaignDetailForProject(userId, input.projectId, campaign.id);
+}
+
+export async function createCouncilOpinionForProject(userId: number, input: { projectId: number; campaignId: number; role: "research" | "architecture" | "product" | "ux" | "security" | "database" | "mobile" | "devops" | "cost" | "qa"; proposal: string; evidenceClaimIds: number[]; risks: string; assumptions: string; confidence: "low" | "medium" | "high"; requestedDecision: "auto" | "review" | "approval" }) {
+  const { db, campaign } = await requireOwnedResearchCampaign(userId, input.projectId, input.campaignId);
+  if (input.evidenceClaimIds.length) {
+    const claims = await db.select({ id: evidenceClaims.id }).from(evidenceClaims).where(and(eq(evidenceClaims.campaignId, campaign.id), inArray(evidenceClaims.id, input.evidenceClaimIds)));
+    if (claims.length !== new Set(input.evidenceClaimIds).size) throw new Error("Council opinion includes a claim outside this campaign");
+  }
+  const existing = await db.select({ id: councilOpinions.id }).from(councilOpinions).where(and(eq(councilOpinions.campaignId, campaign.id), eq(councilOpinions.role, input.role))).limit(1);
+  const values = { proposal: input.proposal, evidenceClaimIdsJson: JSON.stringify(input.evidenceClaimIds), risks: input.risks, assumptions: input.assumptions, confidence: input.confidence, requestedDecision: input.requestedDecision };
+  if (existing[0]) await db.update(councilOpinions).set(values).where(eq(councilOpinions.id, existing[0].id));
+  else await db.insert(councilOpinions).values({ campaignId: campaign.id, role: input.role, ...values });
+  await recordExecutionEvent(userId, input.projectId, { actor: "Agent Council", type: "COUNCIL_OPINION_RECORDED", label: "سُجل رأي مجلس تشاور", detail: input.role });
+  return (await db.select().from(councilOpinions).where(and(eq(councilOpinions.campaignId, campaign.id), eq(councilOpinions.role, input.role))).limit(1))[0];
+}
+
+export async function decideResearchCampaignForProject(userId: number, input: { projectId: number; campaignId: number; title: string; rationale: string }) {
+  const { db, campaign } = await requireOwnedResearchCampaign(userId, input.projectId, input.campaignId);
+  if (campaign.status !== "awaiting_decision") throw new Error("Research campaign must be synthesized before recording a decision");
+  const code = `RESEARCH-${campaign.id}`;
+  const [existing] = await db.select().from(decisions).where(and(eq(decisions.projectId, input.projectId), eq(decisions.code, code))).limit(1);
+  const decision = existing ?? (await db.insert(decisions).values({ projectId: input.projectId, code, title: input.title, rationale: input.rationale, decidedBy: "مالك المشروع" }).then(async (result) => (await db.select().from(decisions).where(eq(decisions.id, Number(result[0].insertId))).limit(1))[0]));
+  await db.update(researchCampaigns).set({ status: "completed" }).where(eq(researchCampaigns.id, campaign.id));
+  await recordExecutionEvent(userId, input.projectId, { actor: "Decision Engine", type: "RESEARCH_DECISION_RECORDED", label: "سُجل قرار مالك لحملة البحث", detail: input.title });
+  return decision;
+}
+
+export async function listEngineConnectionsForOwner(userId: number) {
+  const db = await getDb();
+  if (!db) return [];
+  return db.select().from(engineConnections).where(eq(engineConnections.ownerId, userId)).orderBy(desc(engineConnections.updatedAt));
+}
+
+export async function createEngineConnectionForOwner(userId: number, input: { key: string; name: string; kind: EngineConnectionKind; configReference?: string }) {
+  const db = await getDb();
+  if (!db) throw new Error("Database unavailable");
+  const [result] = await db.insert(engineConnections).values({ ownerId: userId, key: input.key, name: input.name, kind: input.kind, status: "planning", trustTier: input.kind === "internal_planner" || input.kind === "local_runner" ? "project" : "untrusted", capabilitiesJson: JSON.stringify(defaultEngineCapabilities(input.kind)), configReference: input.configReference ?? null });
+  return (await db.select().from(engineConnections).where(eq(engineConnections.id, Number(result.insertId))).limit(1))[0];
+}
+
+export async function createEnginePlanningSessionForProject(userId: number, input: { projectId: number; campaignId?: number; engineConnectionId: number; scopeSummary: string; correlationId: string }) {
+  const { db } = await requireOwnedProject(userId, input.projectId);
+  const [engine] = await db.select().from(engineConnections).where(and(eq(engineConnections.id, input.engineConnectionId), eq(engineConnections.ownerId, userId))).limit(1);
+  if (!engine) throw new Error("Engine connection not found for this owner");
+  assertEnginePlanningOnly({ kind: engine.kind, status: engine.status, executionRequested: false });
+  if (input.campaignId) await requireOwnedResearchCampaign(userId, input.projectId, input.campaignId);
+  const [result] = await db.insert(engineSessions).values({ projectId: input.projectId, campaignId: input.campaignId ?? null, engineConnectionId: engine.id, status: engine.kind === "internal_planner" ? "planned" : "awaiting_approval", scopeSummary: input.scopeSummary, correlationId: input.correlationId });
+  await recordExecutionEvent(userId, input.projectId, { actor: "Engine Adapter Registry", type: "ENGINE_SESSION_PLANNED", label: "خُططت جلسة محرك بلا تشغيل", detail: `${engine.name} · ${engine.kind}` });
+  return (await db.select().from(engineSessions).where(eq(engineSessions.id, Number(result.insertId))).limit(1))[0];
+}
+
+export async function getResearchCampaignDetailForProject(userId: number, projectId: number, campaignId: number) {
+  const { db, campaign } = await requireOwnedResearchCampaign(userId, projectId, campaignId);
+  const [questions, sources, claims, syntheses, opinions, sessions] = await Promise.all([
+    db.select().from(researchQuestions).where(eq(researchQuestions.campaignId, campaign.id)).orderBy(researchQuestions.priority),
+    db.select().from(evidenceSources).where(eq(evidenceSources.campaignId, campaign.id)).orderBy(desc(evidenceSources.fetchedAt)),
+    db.select().from(evidenceClaims).where(eq(evidenceClaims.campaignId, campaign.id)).orderBy(desc(evidenceClaims.relevance)),
+    db.select().from(researchSyntheses).where(eq(researchSyntheses.campaignId, campaign.id)).limit(1),
+    db.select().from(councilOpinions).where(eq(councilOpinions.campaignId, campaign.id)).orderBy(councilOpinions.role),
+    db.select().from(engineSessions).where(and(eq(engineSessions.projectId, projectId), eq(engineSessions.campaignId, campaign.id))).orderBy(desc(engineSessions.createdAt)),
+  ]);
+  const [decision] = await db.select().from(decisions).where(and(eq(decisions.projectId, projectId), eq(decisions.code, `RESEARCH-${campaign.id}`))).limit(1);
+  return { campaign, questions, sources, claims, synthesis: syntheses[0] ?? null, opinions, sessions, decision: decision ?? null };
 }
 
 export type AuthenticatedUser = Pick<User, "id" | "name">;

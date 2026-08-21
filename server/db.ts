@@ -816,6 +816,62 @@ export async function saveMultiFileBundleTemplateForProject(userId: number, inpu
   return { ...template, paths: parseMultiFileTemplatePaths(template.pathsJson) };
 }
 
+export async function renameMultiFileBundleTemplateForProject(userId: number, input: { projectId: number; templateId: number; name: string }) {
+  const { db } = await requireOwnedProject(userId, input.projectId);
+  const name = input.name.trim();
+  if (!name) throw new Error("اسم قالب الحزمة مطلوب.");
+  const [template] = await db.select().from(multiFileBundleTemplates).where(and(
+    eq(multiFileBundleTemplates.id, input.templateId),
+    eq(multiFileBundleTemplates.projectId, input.projectId),
+  )).limit(1);
+  if (!template) throw new Error("قالب الحزمة غير موجود أو لا يمكن الوصول إليه.");
+  const [sameName] = await db.select({ id: multiFileBundleTemplates.id }).from(multiFileBundleTemplates).where(and(
+    eq(multiFileBundleTemplates.projectId, input.projectId),
+    eq(multiFileBundleTemplates.name, name),
+  )).limit(1);
+  if (sameName && sameName.id !== template.id) throw new Error("يوجد قالب آخر بهذا الاسم داخل المشروع.");
+  await db.update(multiFileBundleTemplates).set({ name, updatedAt: new Date() }).where(eq(multiFileBundleTemplates.id, template.id));
+  const [workspace] = await db.select().from(workspaces).where(eq(workspaces.projectId, input.projectId)).limit(1);
+  if (workspace) await recordWorkspaceAudit(workspace.id, {
+    actor: "Multi-file Template",
+    action: "gate_requested",
+    path: template.entryPath,
+    detail: `أُعيدت تسمية قالب حزمة TypeScript من «${template.name}» إلى «${name}»؛ لا ينشئ ذلك طلب تنفيذ.`,
+  });
+  await recordExecutionEvent(userId, input.projectId, {
+    actor: "Multi-file Template",
+    type: "MULTI_FILE_TEMPLATE_RENAMED",
+    label: "أُعيدت تسمية قالب حزمة TypeScript",
+    detail: `${template.name} → ${name}`,
+  });
+  const [updated] = await db.select().from(multiFileBundleTemplates).where(eq(multiFileBundleTemplates.id, template.id)).limit(1);
+  return { ...updated, paths: parseMultiFileTemplatePaths(updated.pathsJson) };
+}
+
+export async function deleteMultiFileBundleTemplateForProject(userId: number, input: { projectId: number; templateId: number }) {
+  const { db } = await requireOwnedProject(userId, input.projectId);
+  const [template] = await db.select().from(multiFileBundleTemplates).where(and(
+    eq(multiFileBundleTemplates.id, input.templateId),
+    eq(multiFileBundleTemplates.projectId, input.projectId),
+  )).limit(1);
+  if (!template) throw new Error("قالب الحزمة غير موجود أو لا يمكن الوصول إليه.");
+  await db.delete(multiFileBundleTemplates).where(eq(multiFileBundleTemplates.id, template.id));
+  const [workspace] = await db.select().from(workspaces).where(eq(workspaces.projectId, input.projectId)).limit(1);
+  if (workspace) await recordWorkspaceAudit(workspace.id, {
+    actor: "Multi-file Template",
+    action: "tool_rejected",
+    path: template.entryPath,
+    detail: `حُذف قالب حزمة TypeScript «${template.name}» بطلب صريح من المالك؛ لم تُحذف ملفات Workspace أو طلبات التنفيذ.`,
+  });
+  await recordExecutionEvent(userId, input.projectId, {
+    actor: "Multi-file Template",
+    type: "MULTI_FILE_TEMPLATE_DELETED",
+    label: "حُذف قالب حزمة TypeScript",
+    detail: `${template.name} · لم تتأثر ملفات Workspace`,
+  });
+  return { id: template.id, deleted: true as const };
+}
+
 export async function getWorkerSettingsForOwner(userId: number) {
   const db = await getDb();
   if (!db) throw new Error("Database not available");

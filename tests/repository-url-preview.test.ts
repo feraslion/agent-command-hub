@@ -23,9 +23,16 @@ describe("repository URL preview", () => {
     });
   });
 
+  it("recognizes Bitbucket repositories and uses its platform identity", () => {
+    expect(previewRepositoryUrl("https://bitbucket.org/team/hub.git")).toMatchObject({
+      state: "ready",
+      preview: { provider: "bitbucket", platformLabel: "Bitbucket", repositoryName: "hub", namespace: "team" },
+    });
+  });
+
   it("rejects credentials, SSH-like text, and unsupported hosts", () => {
     expect(previewRepositoryUrl("https://token@gitlab.com/group/hub")).toMatchObject({ state: "invalid" });
     expect(previewRepositoryUrl("git@github.com:owner/repo.git")).toMatchObject({ state: "invalid" });
-    expect(previewRepositoryUrl("https://bitbucket.org/owner/repo")).toMatchObject({ state: "invalid" });
+    expect(previewRepositoryUrl("https://example.com/owner/repo")).toMatchObject({ state: "invalid" });
   });
 });

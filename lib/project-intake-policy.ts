@@ -37,14 +37,18 @@ export function validateRepositoryReference(input: { remoteUrl: string; reposito
     throw new ProjectIntakePolicyError("استخدم رابط HTTPS عاماً للمستودع من دون بيانات اعتماد أو معاملات إضافية.");
   }
   const provider = allowedRepositoryHosts.get(url.hostname.toLowerCase());
-  if (!provider || url.pathname.split("/").filter(Boolean).length < 2) {
+  const pathParts = url.pathname.replace(/\.git$/i, "").split("/").filter(Boolean);
+  if (!provider || pathParts.length < 2) {
     throw new ProjectIntakePolicyError("يدعم هذا الإصدار روابط GitHub أو GitLab أو Bitbucket العامة فقط.");
+  }
+  if ((provider === "github" || provider === "bitbucket") && pathParts.length !== 2) {
+    throw new ProjectIntakePolicyError("يجب أن يكون رابط GitHub أو Bitbucket بصيغة المالك/المستودع فقط.");
   }
   const defaultBranch = input.defaultBranch.trim();
   if (!/^[A-Za-z0-9._/-]{1,128}$/.test(defaultBranch) || defaultBranch.includes("..")) {
     throw new ProjectIntakePolicyError("اسم الفرع الافتراضي غير صالح.");
   }
-  const inferredName = url.pathname.replace(/\.git$/i, "").split("/").filter(Boolean).slice(-2).join("/");
+  const inferredName = pathParts.slice(-2).join("/");
   return {
     provider,
     remoteUrl: url.toString().replace(/\/$/, ""),

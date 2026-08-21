@@ -1,7 +1,7 @@
 export type RepositoryPreview = {
-  provider: "github" | "gitlab";
-  iconName: "github" | "gitlab";
-  platformLabel: "GitHub" | "GitLab";
+  provider: "github" | "gitlab" | "bitbucket";
+  iconName: "github" | "gitlab" | "bitbucket";
+  platformLabel: "GitHub" | "GitLab" | "Bitbucket";
   repositoryName: string;
   namespace: string;
   normalizedUrl: string;
@@ -15,6 +15,7 @@ export type RepositoryPreviewResult =
 const providers = {
   "github.com": { provider: "github", iconName: "github", platformLabel: "GitHub" },
   "gitlab.com": { provider: "gitlab", iconName: "gitlab", platformLabel: "GitLab" },
+  "bitbucket.org": { provider: "bitbucket", iconName: "bitbucket", platformLabel: "Bitbucket" },
 } as const;
 
 export function previewRepositoryUrl(value: string): RepositoryPreviewResult {
@@ -30,7 +31,7 @@ export function previewRepositoryUrl(value: string): RepositoryPreviewResult {
     return { state: "invalid", message: "استخدم رابط HTTPS بلا بيانات اعتماد أو معاملات إضافية." };
   }
   const provider = providers[url.hostname.toLowerCase() as keyof typeof providers];
-  if (!provider) return { state: "invalid", message: "تدعم المعاينة الفورية GitHub وGitLab فقط." };
+  if (!provider) return { state: "invalid", message: "تدعم المعاينة الفورية GitHub وGitLab وBitbucket فقط." };
   const parts = url.pathname.replace(/\.git$/i, "").split("/").filter(Boolean);
   if (parts.length < 2) return { state: "invalid", message: "أدخل رابطاً يتضمن المالك واسم المستودع." };
   const repositoryName = parts.at(-1) ?? "";

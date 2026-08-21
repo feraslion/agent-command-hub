@@ -220,6 +220,11 @@ export const appRouter = router({
       repositoryName: z.string().trim().max(255).optional(),
       defaultBranch: z.string().trim().min(1).max(128).default("main"),
     })).mutation(({ ctx, input }) => db.registerProjectRepositoryForOwner(ctx.user.id, input)),
+    verifyRepository: protectedProcedure.input(projectIdInput.extend({
+      remoteUrl: z.string().trim().url().max(512),
+      defaultBranch: z.string().trim().min(1).max(128).default("main"),
+      confirm: z.literal(true),
+    })).mutation(({ ctx, input }) => db.verifyProjectRepositoryForOwner(ctx.user.id, input)),
     requestBuild: protectedProcedure.input(projectIdInput.extend({
       importId: z.number().int().positive().optional(),
       target: z.enum(["web", "android", "ios", "node", "docker", "custom"]),

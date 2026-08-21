@@ -70,6 +70,7 @@ import { buildPlannerTaskProposals, parsePlannerProposalCriteria } from "../lib/
 import { assertEnginePlanningOnly, defaultEngineCapabilities, evidenceInstructionRisk, trustTierForSourceType, type EngineConnectionKind, type ResearchSourceType } from "../lib/research-fabric-policy";
 import { buildResearchSynthesis } from "../lib/research-synthesis";
 import { validateBuildRequest, validateRepositoryReference, validateZipArchive } from "../lib/project-intake-policy";
+import { verifyPublicRepository } from "../lib/repository-existence-check";
 import { storagePut } from "./storage";
 
 let _db: ReturnType<typeof drizzle> | null = null;
@@ -1823,6 +1824,18 @@ export async function registerProjectRepositoryForOwner(userId: number, input: {
   const [result] = await db.insert(projectImports).values({ projectId: input.projectId, ownerId: userId, source: "repository", status: "registered", displayName: repository.repositoryName, remoteUrl: repository.remoteUrl, provider: repository.provider, summary });
   await recordExecutionEvent(userId, input.projectId, { actor: "مالك المشروع", type: "REPOSITORY_REFERENCE_REGISTERED", label: "تم تسجيل مرجع مستودع", detail: summary });
   return (await db.select().from(projectImports).where(eq(projectImports.id, Number(result.insertId))).limit(1))[0];
+}
+
+export async function verifyProjectRepositoryForOwner(userId: number, input: { projectId: number; remoteUrl: string; defaultBranch: string }) {
+  await requireOwnedProject(userId, input.projectId);
+  const result = await verifyPublicRepository(input);
+  await recordExecutionEvent(userId, input.projectId, {
+    actor: "مالك المشروع",
+    type: "REPOSITORY_PUBLIC_CHECK",
+    label: "فحص وجود مستودع عام",
+    detail: `فحص صريح لمستودع ${result.provider}: ${result.status}. ${result.message}`,
+  });
+  return result;
 }
 
 export async function createProjectBuildRequestForOwner(userId: number, input: { projectId: number; importId?: number; target: string; title: string; summary: string }) {

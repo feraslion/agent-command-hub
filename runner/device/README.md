@@ -8,6 +8,9 @@
 | `smoke-test-typescript.sh` | اختبار محلي آمن للصورة، بلا شبكة وبنفس حدود حاوية الـ Runner. |
 | `.env.runner.example` | مثال لإعداد محلي يحفظ عنوان الخادم ومفتاح Runner ورمز الربط. |
 | `run-local-runner.sh` | يتحقق من الإعداد ثم يشغل عميل Runner بعد فحص Docker التمهيدي. |
+| `docker-compose.runner.yml` | تعريف Compose محلي مقيد لتشغيل Runner باستمرار على جهاز المالك. |
+| `run-compose-runner.sh` | غلاف Compose ينشئ مساحة عمل محلية مؤقتة ولا يطبع إعداد الإقران. |
+| `verify-compose-runner.sh` | يتحقق من الإعداد ثم يجري نبضة أو يطلب تنفيذاً واحداً معتمداً. |
 
 ## المتطلبات
 
@@ -82,6 +85,43 @@ chmod 600 runner/device/.env.runner
 لإجراء نبضة واحدة بدلاً من الاستماع المستمر، نفذ `./runner/device/run-local-runner.sh --once`، أو غيّر `AGENTHUB_RUN_ONCE=true` في ملف الإعداد. تبقى صيغة الوسائط المباشرة مدعومة للتوافق: `./runner/device/run-local-runner.sh SERVER_URL RUNNER_KEY RUNNER_TOKEN [--once]`. بعد تشغيل العميل، أنشئ طلب تنفيذ ملف مستقل داخل `source/` أو `tests/`، اعتمده من مركز التحكم، ثم راقب الحالة وstdout وstderr ورمز الخروج والمدة في تبويب **Runtime**.
 
 > لا يربط الـ Runner مجلد المستخدم داخل الحاوية، ولا يمرر متغيرات بيئة المضيف إليها، ولا يقبل صورة Docker أو أمراً قادماً من الخادم.
+
+## 5.1 تشغيل Runner عبر Docker Compose
+
+يتيح هذا المسار بقاء Runner شغالاً محلياً على جهاز المالك مع نبضة دورية. لا يحتوي Compose أو صورة Runner على مفتاح أو رمز؛ يقرأ Runner الملف المحلي `runner/device/.env.runner` للقراءة فقط. أنشئ الإقران من التطبيق أولاً ثم جهز الملف كما في القسم السابق.
+
+```bash
+./runner/device/build-typescript-image.sh
+./runner/device/run-compose-runner.sh up -d --build
+./runner/device/run-compose-runner.sh logs -f --tail=50
+```
+
+يقيد Compose الحاوية الخارجية بجذر قراءة فقط و`tmpfs` وبدون capabilities إضافية وحدود 384MB و0.50 CPU و128 عملية. لكنه يربط **Docker socket** المحلي لأن Runner يحتاج إنشاء حاويات التنفيذ المقيدة. هذا الربط يمنح الحاوية قدرة قوية على Docker الخاص بجهازك؛ لذلك استخدمه على جهازك الموثوق فقط، وابن الصورة من هذا المستودع ولا تعرّض socket إلى الشبكة أو تستبدل الصورة بصورة غير موثوقة.
+
+### تحقق النبض
+
+```bash
+./runner/device/verify-compose-runner.sh heartbeat
+```
+
+يفحص الأمر الإعداد وDocker، ثم يشغّل Runner في وضع `--once` لإرسال نبضة وطلب آمن واحد. تحقق من بطاقة Runner داخل التطبيق؛ يجب أن تعرض وقت نبضة حديثاً، ولا يكشف الأمر المفتاح أو الرمز.
+
+### تحقق التنفيذ المعتمد
+
+1. من التطبيق، أنشئ طلب `node_script` صغيراً ضمن `source/` أو `tests/`، واعتمده صراحةً.
+2. على جهاز Docker، نفذ:
+
+```bash
+./runner/device/verify-compose-runner.sh execution
+```
+
+3. افحص تبويب **Runtime**: يجب أن ترى حالة `completed` أو `failed`، ورمز الخروج والمدة وخرجاً منقحاً. لا تعد النتيجة دليلاً على الجاهزية إلا إذا سجلت النبضة والتنفيذ الفعليين.
+
+لإيقاف الخدمة المحلية لاحقاً:
+
+```bash
+./runner/device/run-compose-runner.sh down
+```
 
 ## 6. فحص مستودع محلي قبل التخطيط
 

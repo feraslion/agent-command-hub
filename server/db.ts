@@ -26,7 +26,9 @@ import {
   modelCostReservations,
   modelUsage,
   plannerTaskProposals,
+  projectBuildRequests,
   projectBriefs,
+  projectImports,
   projectReports,
   researchCampaigns,
   researchQuestions,
@@ -67,6 +69,8 @@ import type { PlannerInterpretation } from "../lib/planner-output-interpreter";
 import { buildPlannerTaskProposals, parsePlannerProposalCriteria } from "../lib/planner-task-proposals";
 import { assertEnginePlanningOnly, defaultEngineCapabilities, evidenceInstructionRisk, trustTierForSourceType, type EngineConnectionKind, type ResearchSourceType } from "../lib/research-fabric-policy";
 import { buildResearchSynthesis } from "../lib/research-synthesis";
+import { validateBuildRequest, validateRepositoryReference, validateZipArchive } from "../lib/project-intake-policy";
+import { storagePut } from "./storage";
 
 let _db: ReturnType<typeof drizzle> | null = null;
 
@@ -1788,6 +1792,51 @@ export async function recordExecutionEvent(userId: number, projectId: number, in
     detail: input.detail,
   });
   return Number(result.insertId);
+}
+
+export async function listProjectIntakeForOwner(userId: number, projectId: number) {
+  const { db } = await requireOwnedProject(userId, projectId);
+  const [imports, buildRequests, repositoryLink] = await Promise.all([
+    db.select().from(projectImports).where(eq(projectImports.projectId, projectId)).orderBy(desc(projectImports.createdAt)).limit(30),
+    db.select().from(projectBuildRequests).where(eq(projectBuildRequests.projectId, projectId)).orderBy(desc(projectBuildRequests.createdAt)).limit(30),
+    db.select().from(projectRepositoryLinks).where(eq(projectRepositoryLinks.projectId, projectId)).limit(1),
+  ]);
+  return { imports, buildRequests, repositoryLink: repositoryLink[0] ?? null, policy: { execution: "blocked", clone: "blocked", push: "blocked", merge: "blocked" } };
+}
+
+export async function importProjectZipForOwner(userId: number, input: { projectId: number; fileName: string; byteSize: number; bytes: Uint8Array }) {
+  const validated = validateZipArchive(input);
+  const { db } = await requireOwnedProject(userId, input.projectId);
+  const stored = await storagePut(`project-imports/${userId}/${input.projectId}/${validated.safeName}`, input.bytes, "application/zip");
+  const summary = `أرشيف ZIP محفوظ للمراجعة فقط (${Math.ceil(validated.byteSize / 1024)}KB). لم يُفك ولم يُنفذ.`;
+  const [result] = await db.insert(projectImports).values({ projectId: input.projectId, ownerId: userId, source: "zip", status: "received", displayName: validated.safeName, storageKey: stored.key, byteSize: validated.byteSize, summary });
+  await db.insert(artifacts).values({ projectId: input.projectId, name: validated.safeName, kind: "project_archive", storageKey: stored.key, summary });
+  await recordExecutionEvent(userId, input.projectId, { actor: "مالك المشروع", type: "PROJECT_ARCHIVE_RECEIVED", label: "تم حفظ أرشيف مشروع", detail: summary });
+  return (await db.select().from(projectImports).where(eq(projectImports.id, Number(result.insertId))).limit(1))[0];
+}
+
+export async function registerProjectRepositoryForOwner(userId: number, input: { projectId: number; remoteUrl: string; repositoryName?: string; defaultBranch: string }) {
+  const repository = validateRepositoryReference(input);
+  const { db } = await requireOwnedProject(userId, input.projectId);
+  await db.insert(projectRepositoryLinks).values({ projectId: input.projectId, remoteUrl: repository.remoteUrl, repositoryName: repository.repositoryName, defaultBranch: repository.defaultBranch, status: "unlinked" }).onDuplicateKeyUpdate({ set: { remoteUrl: repository.remoteUrl, repositoryName: repository.repositoryName, defaultBranch: repository.defaultBranch, status: "unlinked" } });
+  const summary = `مرجع ${repository.provider} مسجل للمراجعة فقط؛ لم يُستنسخ المستودع ولم تُستخدم بيانات اعتماد.`;
+  const [result] = await db.insert(projectImports).values({ projectId: input.projectId, ownerId: userId, source: "repository", status: "registered", displayName: repository.repositoryName, remoteUrl: repository.remoteUrl, provider: repository.provider, summary });
+  await recordExecutionEvent(userId, input.projectId, { actor: "مالك المشروع", type: "REPOSITORY_REFERENCE_REGISTERED", label: "تم تسجيل مرجع مستودع", detail: summary });
+  return (await db.select().from(projectImports).where(eq(projectImports.id, Number(result.insertId))).limit(1))[0];
+}
+
+export async function createProjectBuildRequestForOwner(userId: number, input: { projectId: number; importId?: number; target: string; title: string; summary: string }) {
+  const build = validateBuildRequest(input);
+  const { db } = await requireOwnedProject(userId, input.projectId);
+  if (input.importId) {
+    const [source] = await db.select({ id: projectImports.id }).from(projectImports).where(and(eq(projectImports.id, input.importId), eq(projectImports.projectId, input.projectId))).limit(1);
+    if (!source) throw new Error("مصدر المشروع غير موجود ضمن هذا المشروع.");
+  }
+  const [approvalResult] = await db.insert(approvals).values({ projectId: input.projectId, requestedBy: "منصة استيراد المشروع", title: `اعتماد طلب بناء: ${build.title}`, detail: `طلب تخطيط لبناء هدف ${build.target}. لا ينفذ هذا الإصدار أي بناء أو رفع؛ الاعتماد يسجل قراراً فقط. ${build.summary}`, impact: "يتطلب بيئة بناء محلية مقيدة بعد إثبات Runner.", level: "approval" });
+  const approvalId = Number(approvalResult.insertId);
+  const [result] = await db.insert(projectBuildRequests).values({ projectId: input.projectId, importId: input.importId ?? null, requestedByUserId: userId, target: build.target, status: "awaiting_approval", title: build.title, summary: build.summary, approvalId });
+  await recordExecutionEvent(userId, input.projectId, { actor: "مالك المشروع", type: "BUILD_REQUEST_PLANNED", label: "تم تخطيط طلب بناء", detail: `الهدف ${build.target} بانتظار اعتماد صريح؛ لا يوجد تنفيذ أو رفع.` });
+  return (await db.select().from(projectBuildRequests).where(eq(projectBuildRequests.id, Number(result.insertId))).limit(1))[0];
 }
 
 export async function listProjectApprovals(userId: number, projectId: number) {

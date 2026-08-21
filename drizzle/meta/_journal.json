@@ -176,6 +176,13 @@
       "when": 1787312634499,
       "tag": "0024_clever_kronos",
       "breakpoints": true
+    },
+    {
+      "idx": 25,
+      "version": "5",
+      "when": 1787326447416,
+      "tag": "0025_absent_champions",
+      "breakpoints": true
     }
   ]
 }

@@ -208,6 +208,25 @@ export const appRouter = router({
   repositoryScans: router({
     list: protectedProcedure.input(z.object({ projectId: z.number().int().positive().optional() }).optional()).query(({ ctx, input }) => db.listRepositoryScansForOwner(ctx.user.id, input?.projectId)),
   }),
+  projectIntake: router({
+    overview: protectedProcedure.input(projectIdInput).query(({ ctx, input }) => db.listProjectIntakeForOwner(ctx.user.id, input.projectId)),
+    importZip: protectedProcedure.input(projectIdInput.extend({
+      fileName: z.string().trim().min(5).max(255),
+      byteSize: z.number().int().positive().max(8 * 1024 * 1024),
+      base64: z.string().min(4).max(12_000_000),
+    })).mutation(({ ctx, input }) => db.importProjectZipForOwner(ctx.user.id, { ...input, bytes: Buffer.from(input.base64, "base64") })),
+    registerRepository: protectedProcedure.input(projectIdInput.extend({
+      remoteUrl: z.string().trim().url().max(512),
+      repositoryName: z.string().trim().max(255).optional(),
+      defaultBranch: z.string().trim().min(1).max(128).default("main"),
+    })).mutation(({ ctx, input }) => db.registerProjectRepositoryForOwner(ctx.user.id, input)),
+    requestBuild: protectedProcedure.input(projectIdInput.extend({
+      importId: z.number().int().positive().optional(),
+      target: z.enum(["web", "android", "ios", "node", "docker", "custom"]),
+      title: z.string().trim().min(3).max(255),
+      summary: z.string().trim().min(8).max(4_000),
+    })).mutation(({ ctx, input }) => db.createProjectBuildRequestForOwner(ctx.user.id, input)),
+  }),
   gitGate: router({
     boundary: protectedProcedure.query(() => ({ allowed: ["inspect", "request_pull_request"], blocked: ["push", "merge", "force_push", "delete_branch", "change_protection"] })),
     requestPullRequest: protectedProcedure.input(z.object({

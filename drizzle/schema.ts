@@ -54,6 +54,10 @@ export const councilOpinionRoleValues = ["research", "architecture", "product", 
 export const engineConnectionKindValues = ["internal_planner", "local_runner", "github_pr", "openhands", "mcp"] as const;
 export const engineConnectionStatusValues = ["disabled", "planning", "approved"] as const;
 export const engineSessionStatusValues = ["planned", "awaiting_approval", "blocked", "cancelled", "completed"] as const;
+export const projectImportSourceValues = ["zip", "repository"] as const;
+export const projectImportStatusValues = ["received", "registered", "rejected"] as const;
+export const projectBuildRequestStatusValues = ["draft", "awaiting_approval", "approved", "rejected", "cancelled"] as const;
+export const projectBuildTargetValues = ["web", "android", "ios", "node", "docker", "custom"] as const;
 
 export const projects = mysqlTable("projects", {
   id: int("id").autoincrement().primaryKey(),
@@ -790,6 +794,41 @@ export const repositoryScans = mysqlTable("repository_scans", {
 }, (table) => [
   index("repository_scans_project_created_idx").on(table.projectId, table.createdAt),
   index("repository_scans_runner_created_idx").on(table.runnerId, table.createdAt),
+]);
+
+export const projectImports = mysqlTable("project_imports", {
+  id: int("id").autoincrement().primaryKey(),
+  projectId: int("project_id").notNull().references(() => projects.id, { onDelete: "cascade" }),
+  ownerId: int("owner_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+  source: mysqlEnum("source", projectImportSourceValues).notNull(),
+  status: mysqlEnum("status", projectImportStatusValues).default("received").notNull(),
+  displayName: varchar("display_name", { length: 255 }).notNull(),
+  storageKey: varchar("storage_key", { length: 512 }),
+  remoteUrl: varchar("remote_url", { length: 512 }),
+  provider: varchar("provider", { length: 64 }),
+  byteSize: int("byte_size"),
+  summary: text("summary").notNull(),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+}, (table) => [
+  index("project_imports_project_created_idx").on(table.projectId, table.createdAt),
+  index("project_imports_owner_created_idx").on(table.ownerId, table.createdAt),
+]);
+
+export const projectBuildRequests = mysqlTable("project_build_requests", {
+  id: int("id").autoincrement().primaryKey(),
+  projectId: int("project_id").notNull().references(() => projects.id, { onDelete: "cascade" }),
+  importId: int("import_id").references(() => projectImports.id, { onDelete: "set null" }),
+  requestedByUserId: int("requested_by_user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+  target: mysqlEnum("target", projectBuildTargetValues).notNull(),
+  status: mysqlEnum("status", projectBuildRequestStatusValues).default("awaiting_approval").notNull(),
+  title: varchar("title", { length: 255 }).notNull(),
+  summary: text("summary").notNull(),
+  approvalId: int("approval_id").references(() => approvals.id, { onDelete: "set null" }),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().onUpdateNow().notNull(),
+}, (table) => [
+  index("project_build_requests_project_created_idx").on(table.projectId, table.createdAt),
+  index("project_build_requests_status_idx").on(table.status),
 ]);
 
 export type User = typeof users.$inferSelect;

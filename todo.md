@@ -316,3 +316,4 @@
 - [x] رفع إعداد Docker Compose للـRunner إلى GitHub عبر Pull Request محمي.
 - [x] إعادة أساس فرق Docker Compose على أحدث main في GitHub قبل إنشاء طلب السحب.
 - [ ] إعداد توقيع Android إنتاجي عبر keystore محفوظ في أسرار آمنة قبل أي توزيع خارجي.
+- [x] إضافة إدارة آمنة لإعادة تسمية وحذف قوالب حزم TypeScript داخل المشروع.

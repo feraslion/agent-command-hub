@@ -155,6 +155,19 @@ export async function createAgentCommandForOwner(ownerId: number, input: { agent
   return command;
 }
 
+export async function listAgentCommandsForOwner(ownerId: number) {
+  const db = await getDb();
+  if (!db) return [];
+  return db.select({
+    id: agentCommandRequests.id,
+    agentKey: agentCommandRequests.agentKey,
+    intent: agentCommandRequests.intent,
+    instruction: agentCommandRequests.instruction,
+    status: agentCommandRequests.status,
+    createdAt: agentCommandRequests.createdAt,
+  }).from(agentCommandRequests).where(eq(agentCommandRequests.ownerId, ownerId)).orderBy(desc(agentCommandRequests.createdAt)).limit(30);
+}
+
 export async function listHostingTargetsForOwner(ownerId: number) {
   const db = await getDb();
   if (!db) return [];

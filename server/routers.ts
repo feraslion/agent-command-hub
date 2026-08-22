@@ -46,6 +46,7 @@ export const appRouter = router({
     }),
   }),
   agentCommands: router({
+    list: protectedProcedure.query(({ ctx }) => db.listAgentCommandsForOwner(ctx.user.id)),
     create: protectedProcedure.input(z.object({ agentKey: z.string().trim().min(1).max(64), intent: z.enum(["plan", "review", "debug"]), instruction: z.string().trim().min(1).max(2_000) })).mutation(({ ctx, input }) => db.createAgentCommandForOwner(ctx.user.id, input)),
   }),
   hosting: router({

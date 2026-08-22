@@ -16,6 +16,7 @@ import { runAgentChat } from "./agent-chat-service";
 import { sanitizeAgentChatText } from "../lib/agent-chat-policy";
 import { persistChatAssistantReply } from "./chat-history-service";
 import { hostingProviderValues, hostingTargetKindValues } from "../lib/server-hosting-policy";
+import { apiConnectionProviderValues } from "../lib/api-connection-policy";
 
 const projectIdInput = z.object({ projectId: z.number().int().positive() });
 const taskStatus = z.enum(["pending", "queued", "running", "verifying", "completed", "failed", "debugging", "retrying", "cancelled"]);
@@ -61,6 +62,11 @@ export const appRouter = router({
     })).mutation(({ ctx, input }) => db.createHostingTargetForOwner(ctx.user.id, input)),
     test: protectedProcedure.input(z.object({ targetId: z.number().int().positive() })).mutation(({ ctx, input }) => db.testHostingTargetForOwner(ctx.user.id, input.targetId)),
     remove: protectedProcedure.input(z.object({ targetId: z.number().int().positive() })).mutation(({ ctx, input }) => db.removeHostingTargetForOwner(ctx.user.id, input.targetId)),
+  }),
+  apiConnections: router({
+    list: protectedProcedure.query(({ ctx }) => db.listApiConnectionsForOwner(ctx.user.id)),
+    requestSetup: protectedProcedure.input(z.object({ provider: z.enum(apiConnectionProviderValues) })).mutation(({ ctx, input }) => db.requestApiConnectionForOwner(ctx.user.id, input.provider)),
+    remove: protectedProcedure.input(z.object({ connectionId: z.number().int().positive() })).mutation(({ ctx, input }) => db.removeApiConnectionForOwner(ctx.user.id, input.connectionId)),
   }),
   projects: router({
     list: protectedProcedure.query(({ ctx }) => db.listProjectsForOwner(ctx.user.id)),

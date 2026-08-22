@@ -66,6 +66,9 @@ export const hostingCheckStatusValues = ["not_tested", "reachable", "unreachable
 export const chatAttachmentKindValues = ["image", "pdf", "text", "zip"] as const;
 export const agentCommandIntentValues = ["plan", "review", "debug"] as const;
 export const agentCommandStatusValues = ["queued", "cancelled"] as const;
+export const apiConnectionProviderValues = ["github", "openrouter", "public_apis"] as const;
+export const apiConnectionAuthModeValues = ["oauth", "api_key", "none"] as const;
+export const apiConnectionStatusValues = ["awaiting_setup", "linked"] as const;
 
 export const chatMessages = mysqlTable("chat_messages", {
   id: int("id").autoincrement().primaryKey(),
@@ -120,6 +123,20 @@ export const hostingTargets = mysqlTable("hosting_targets", {
   updatedAt: timestamp("updated_at").defaultNow().onUpdateNow().notNull(),
 }, (table) => [
   index("hosting_targets_owner_updated_idx").on(table.ownerId, table.updatedAt),
+]);
+
+export const apiConnections = mysqlTable("api_connections", {
+  id: int("id").autoincrement().primaryKey(),
+  ownerId: int("owner_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+  provider: mysqlEnum("provider", apiConnectionProviderValues).notNull(),
+  authMode: mysqlEnum("auth_mode", apiConnectionAuthModeValues).notNull(),
+  status: mysqlEnum("status", apiConnectionStatusValues).default("awaiting_setup").notNull(),
+  lastRequestedAt: timestamp("last_requested_at").defaultNow().notNull(),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().onUpdateNow().notNull(),
+}, (table) => [
+  uniqueIndex("api_connections_owner_provider_unique").on(table.ownerId, table.provider),
+  index("api_connections_owner_updated_idx").on(table.ownerId, table.updatedAt),
 ]);
 
 export const projects = mysqlTable("projects", {

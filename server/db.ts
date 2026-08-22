@@ -8,6 +8,8 @@ import {
   agents,
   approvals,
   artifacts,
+  agentCommandRequests,
+  chatAttachments,
   chatMessages,
   contextPackages,
   costEntries,
@@ -81,6 +83,7 @@ import { buildPublicApisSearchUrl, parsePublicApisResponse, publicApisOperationF
 import { storageGetSignedUrl, storagePut } from "./storage";
 import { validateHostingTarget, type HostingProvider, type HostingTargetKind } from "../lib/server-hosting-policy";
 import { runManualHostingCheck } from "./hosting-connectivity-service";
+import { redactAttachmentText, validateChatAttachment, type ChatAttachmentKind } from "../lib/chat-attachment-policy";
 
 let _db: ReturnType<typeof drizzle> | null = null;
 
@@ -106,6 +109,50 @@ export async function addChatMessageForOwner(input: { ownerId: number; role: "us
   const db = await getDb();
   if (!db) throw new Error("قاعدة البيانات غير متاحة لحفظ الدردشة.");
   await db.insert(chatMessages).values({ ownerId: input.ownerId, role: input.role, content: input.content, model: input.model ?? null });
+}
+
+export async function listChatAttachmentsForOwner(ownerId: number) {
+  const db = await getDb();
+  if (!db) return [];
+  return db.select({ id: chatAttachments.id, fileName: chatAttachments.fileName, mimeType: chatAttachments.mimeType, kind: chatAttachments.kind, byteSize: chatAttachments.byteSize, summary: chatAttachments.summary, createdAt: chatAttachments.createdAt }).from(chatAttachments).where(eq(chatAttachments.ownerId, ownerId)).orderBy(desc(chatAttachments.createdAt)).limit(30);
+}
+
+export async function addChatAttachmentForOwner(input: { ownerId: number; fileName: string; mimeType: string; byteSize: number; base64: string }) {
+  const db = await getDb();
+  if (!db) throw new Error("قاعدة البيانات غير متاحة لحفظ المرفق.");
+  const bytes = Buffer.from(input.base64, "base64");
+  const safe = validateChatAttachment({ fileName: input.fileName, mimeType: input.mimeType, byteSize: input.byteSize, bytes });
+  const stored = await storagePut(`chat/${input.ownerId}/${safe.fileName}`, bytes, safe.mimeType);
+  const [result] = await db.insert(chatAttachments).values({ ownerId: input.ownerId, fileName: safe.fileName, mimeType: safe.mimeType, kind: safe.kind, byteSize: input.byteSize, storageKey: stored.key, summary: safe.summary });
+  const [attachment] = await db.select().from(chatAttachments).where(and(eq(chatAttachments.id, Number(result.insertId)), eq(chatAttachments.ownerId, input.ownerId))).limit(1);
+  if (!attachment) throw new Error("تعذر قراءة المرفق بعد حفظه.");
+  return attachment;
+}
+
+export async function getChatAttachmentContextForOwner(ownerId: number, attachmentIds: number[]) {
+  if (!attachmentIds.length) return [];
+  const db = await getDb();
+  if (!db) return [];
+  const items = await db.select().from(chatAttachments).where(and(eq(chatAttachments.ownerId, ownerId), inArray(chatAttachments.id, attachmentIds))).limit(5);
+  return Promise.all(items.map(async (item) => {
+    if (item.kind !== "text") return { fileName: item.fileName, kind: item.kind as ChatAttachmentKind, summary: item.summary, text: null };
+    const url = await storageGetSignedUrl(item.storageKey);
+    const response = await fetch(url, { redirect: "error" });
+    const text = response.ok ? redactAttachmentText((await response.text()).slice(0, 24_000)) : "";
+    return { fileName: item.fileName, kind: item.kind as ChatAttachmentKind, summary: item.summary, text: text || null };
+  }));
+}
+
+export async function createAgentCommandForOwner(ownerId: number, input: { agentKey: string; intent: "plan" | "review" | "debug"; instruction: string }) {
+  const db = await getDb();
+  if (!db) throw new Error("قاعدة البيانات غير متاحة لحفظ أمر الوكيل.");
+  const agentKey = input.agentKey.trim().slice(0, 64);
+  const instruction = input.instruction.trim().slice(0, 2_000);
+  if (!agentKey || !instruction) throw new Error("حدد الوكيل وتعليمات الأمر أولاً.");
+  const [result] = await db.insert(agentCommandRequests).values({ ownerId, agentKey, intent: input.intent, instruction, status: "queued" });
+  const [command] = await db.select().from(agentCommandRequests).where(and(eq(agentCommandRequests.id, Number(result.insertId)), eq(agentCommandRequests.ownerId, ownerId))).limit(1);
+  if (!command) throw new Error("تعذر حفظ أمر الوكيل.");
+  return command;
 }
 
 export async function listHostingTargetsForOwner(ownerId: number) {

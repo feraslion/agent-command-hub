@@ -32,14 +32,21 @@ export const appRouter = router({
   }),
   chat: router({
     list: protectedProcedure.query(({ ctx }) => db.listChatMessagesForOwner(ctx.user.id)),
-    send: protectedProcedure.input(z.object({ message: z.string().trim().min(1).max(2_000) })).mutation(async ({ ctx, input }) => {
+    attachments: protectedProcedure.query(({ ctx }) => db.listChatAttachmentsForOwner(ctx.user.id)),
+    attach: protectedProcedure.input(z.object({ fileName: z.string().trim().min(1).max(180), mimeType: z.string().trim().min(1).max(128), byteSize: z.number().int().positive().max(5 * 1024 * 1024), base64: z.string().min(4).max(7_000_000) })).mutation(({ ctx, input }) => db.addChatAttachmentForOwner({ ownerId: ctx.user.id, ...input })),
+    send: protectedProcedure.input(z.object({ message: z.string().trim().min(1).max(2_000), attachmentIds: z.array(z.number().int().positive()).max(5).optional() })).mutation(async ({ ctx, input }) => {
       const safeMessage = sanitizeAgentChatText(input.message);
       if (!safeMessage) throw new Error("تعذر حفظ رسالة الدردشة بعد التنقيح.");
-      await db.addChatMessageForOwner({ ownerId: ctx.user.id, role: "user", content: safeMessage });
-      const result = await runAgentChat(safeMessage);
+      const attachments = await db.getChatAttachmentContextForOwner(ctx.user.id, input.attachmentIds ?? []);
+      const attachmentContext = attachments.length ? `\n\n[مرفقات مُنقحة]\n${attachments.map((item) => `- ${item.fileName} (${item.kind}): ${item.text ?? item.summary}`).join("\n")}` : "";
+      await db.addChatMessageForOwner({ ownerId: ctx.user.id, role: "user", content: `${safeMessage}${attachments.length ? `\n[أرفقت: ${attachments.map((item) => item.fileName).join("، ")}]` : ""}` });
+      const result = await runAgentChat(`${safeMessage}${attachmentContext}`);
       await persistChatAssistantReply({ ownerId: ctx.user.id, reply: result.reply, model: result.model }, db.addChatMessageForOwner);
       return result;
     }),
+  }),
+  agentCommands: router({
+    create: protectedProcedure.input(z.object({ agentKey: z.string().trim().min(1).max(64), intent: z.enum(["plan", "review", "debug"]), instruction: z.string().trim().min(1).max(2_000) })).mutation(({ ctx, input }) => db.createAgentCommandForOwner(ctx.user.id, input)),
   }),
   hosting: router({
     list: protectedProcedure.query(({ ctx }) => db.listHostingTargetsForOwner(ctx.user.id)),

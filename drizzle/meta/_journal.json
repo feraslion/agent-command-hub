@@ -225,6 +225,13 @@
       "when": 1787395529127,
       "tag": "0031_talented_lilandra",
       "breakpoints": true
+    },
+    {
+      "idx": 32,
+      "version": "5",
+      "when": 1787402229501,
+      "tag": "0032_special_colonel_america",
+      "breakpoints": true
     }
   ]
 }

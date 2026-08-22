@@ -63,6 +63,9 @@ export const hostingProviderValues = ["render", "tidb_cloud", "railway", "koyeb"
 export const hostingTargetKindValues = ["api", "database"] as const;
 export const hostingTargetStatusValues = ["draft", "ready"] as const;
 export const hostingCheckStatusValues = ["not_tested", "reachable", "unreachable", "blocked"] as const;
+export const chatAttachmentKindValues = ["image", "pdf", "text", "zip"] as const;
+export const agentCommandIntentValues = ["plan", "review", "debug"] as const;
+export const agentCommandStatusValues = ["queued", "cancelled"] as const;
 
 export const chatMessages = mysqlTable("chat_messages", {
   id: int("id").autoincrement().primaryKey(),
@@ -74,6 +77,28 @@ export const chatMessages = mysqlTable("chat_messages", {
 }, (table) => [
   index("chat_messages_owner_created_idx").on(table.ownerId, table.createdAt),
 ]);
+
+export const chatAttachments = mysqlTable("chat_attachments", {
+  id: int("id").autoincrement().primaryKey(),
+  ownerId: int("owner_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+  fileName: varchar("file_name", { length: 180 }).notNull(),
+  mimeType: varchar("mime_type", { length: 128 }).notNull(),
+  kind: mysqlEnum("kind", chatAttachmentKindValues).notNull(),
+  byteSize: int("byte_size").notNull(),
+  storageKey: varchar("storage_key", { length: 512 }).notNull(),
+  summary: varchar("summary", { length: 255 }).notNull(),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+}, (table) => [index("chat_attachments_owner_created_idx").on(table.ownerId, table.createdAt)]);
+
+export const agentCommandRequests = mysqlTable("agent_command_requests", {
+  id: int("id").autoincrement().primaryKey(),
+  ownerId: int("owner_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+  agentKey: varchar("agent_key", { length: 64 }).notNull(),
+  intent: mysqlEnum("intent", agentCommandIntentValues).notNull(),
+  instruction: text("instruction").notNull(),
+  status: mysqlEnum("status", agentCommandStatusValues).default("queued").notNull(),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+}, (table) => [index("agent_command_requests_owner_created_idx").on(table.ownerId, table.createdAt)]);
 
 export const hostingTargets = mysqlTable("hosting_targets", {
   id: int("id").autoincrement().primaryKey(),

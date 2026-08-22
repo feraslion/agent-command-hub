@@ -71,7 +71,7 @@ export type Decision = {
 
 export type ChatMessage = {
   id: string;
-  sender: "أنت" | "النظام";
+  sender: "أنت" | "النظام" | "مساعد القيادة";
   text: string;
   time: string;
 };
@@ -347,6 +347,7 @@ type HubContextValue = {
   addProject: () => void;
   requestVerification: (taskId: string) => void;
   sendMessage: (text: string) => void;
+  addAssistantMessage: (text: string) => void;
   approveRequest: (requestId: string) => void;
   rejectRequest: (requestId: string) => void;
   markAlertRead: (alertId: string) => void;
@@ -398,6 +399,12 @@ export function HubProvider({ children }: PropsWithChildren) {
     setMessages((current) => [...current, { id: `message-${Date.now()}`, sender: "أنت", text: normalized, time: "الآن" }]);
   };
 
+  const addAssistantMessage = (text: string) => {
+    const normalized = text.trim();
+    if (!normalized) return;
+    setMessages((current) => [...current, { id: `assistant-${Date.now()}`, sender: "مساعد القيادة", text: normalized, time: "الآن" }]);
+  };
+
   const resolveRequest = (requestId: string, outcome: "معتمد" | "مرفوض") => {
     const request = approvals.find((item) => item.id === requestId);
     if (!request || request.status !== "قيد الانتظار") return;
@@ -435,7 +442,7 @@ export function HubProvider({ children }: PropsWithChildren) {
   const markAllAlertsRead = () => setReadAlertIds(alerts.map((alert) => alert.id));
   const setNotificationPreference = (key: keyof NotificationPreferences, enabled: boolean) => setNotificationPreferences((current) => ({ ...current, [key]: enabled }));
 
-  const value = useMemo(() => ({ projects, agents: initialAgents, tasks, events, decisions: initialDecisions, messages, costEntries: initialCostEntries, approvals, budgetLimit, budgetHistory, setBudgetLimit, alerts, unreadAlertCount, nativeNotificationsEnabled, notificationPreferences, activeProject, addProject, requestVerification, sendMessage, approveRequest, rejectRequest, markAlertRead, markAllAlertsRead, setNotificationPreference }), [projects, tasks, events, messages, approvals, budgetLimit, budgetHistory, alerts, unreadAlertCount, nativeNotificationsEnabled, notificationPreferences, activeProject]);
+  const value = useMemo(() => ({ projects, agents: initialAgents, tasks, events, decisions: initialDecisions, messages, costEntries: initialCostEntries, approvals, budgetLimit, budgetHistory, setBudgetLimit, alerts, unreadAlertCount, nativeNotificationsEnabled, notificationPreferences, activeProject, addProject, requestVerification, sendMessage, addAssistantMessage, approveRequest, rejectRequest, markAlertRead, markAllAlertsRead, setNotificationPreference }), [projects, tasks, events, messages, approvals, budgetLimit, budgetHistory, alerts, unreadAlertCount, nativeNotificationsEnabled, notificationPreferences, activeProject]);
   return <HubContext.Provider value={value}>{children}</HubContext.Provider>;
 }
 

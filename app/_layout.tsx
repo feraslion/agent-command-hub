@@ -103,6 +103,7 @@ export default function RootLayout() {
               <Stack.Screen name="alerts" />
               <Stack.Screen name="approval/[approvalId]" />
               <Stack.Screen name="settings" />
+              <Stack.Screen name="server-hosting" />
               <Stack.Screen name="oauth/callback" />
             </Stack>
             <StatusBar style="auto" />

@@ -10,6 +10,12 @@ import { runGovernedAgentRole } from "./agent-model-service";
 import { runPlannerAgentExecution } from "./agent-execution-service";
 import { agentModelRoles } from "../lib/agent-model-policy";
 import { buildTemplates } from "../lib/build-template-registry";
+import { notifyOwner } from "./_core/notification";
+import { buildOwnerOperationalDigest } from "../lib/operational-owner-digest";
+import { runAgentChat } from "./agent-chat-service";
+import { sanitizeAgentChatText } from "../lib/agent-chat-policy";
+import { persistChatAssistantReply } from "./chat-history-service";
+import { hostingProviderValues, hostingTargetKindValues } from "../lib/server-hosting-policy";
 
 const projectIdInput = z.object({ projectId: z.number().int().positive() });
 const taskStatus = z.enum(["pending", "queued", "running", "verifying", "completed", "failed", "debugging", "retrying", "cancelled"]);
@@ -23,6 +29,37 @@ export const appRouter = router({
       ctx.res.clearCookie(COOKIE_NAME, { ...cookieOptions, maxAge: -1 });
       return { success: true } as const;
     }),
+  }),
+  chat: router({
+    list: protectedProcedure.query(({ ctx }) => db.listChatMessagesForOwner(ctx.user.id)),
+    attachments: protectedProcedure.query(({ ctx }) => db.listChatAttachmentsForOwner(ctx.user.id)),
+    attach: protectedProcedure.input(z.object({ fileName: z.string().trim().min(1).max(180), mimeType: z.string().trim().min(1).max(128), byteSize: z.number().int().positive().max(5 * 1024 * 1024), base64: z.string().min(4).max(7_000_000) })).mutation(({ ctx, input }) => db.addChatAttachmentForOwner({ ownerId: ctx.user.id, ...input })),
+    send: protectedProcedure.input(z.object({ message: z.string().trim().min(1).max(2_000), attachmentIds: z.array(z.number().int().positive()).max(5).optional() })).mutation(async ({ ctx, input }) => {
+      const safeMessage = sanitizeAgentChatText(input.message);
+      if (!safeMessage) throw new Error("تعذر حفظ رسالة الدردشة بعد التنقيح.");
+      const attachments = await db.getChatAttachmentContextForOwner(ctx.user.id, input.attachmentIds ?? []);
+      const attachmentContext = attachments.length ? `\n\n[مرفقات مُنقحة]\n${attachments.map((item) => `- ${item.fileName} (${item.kind}): ${item.text ?? item.summary}`).join("\n")}` : "";
+      await db.addChatMessageForOwner({ ownerId: ctx.user.id, role: "user", content: `${safeMessage}${attachments.length ? `\n[أرفقت: ${attachments.map((item) => item.fileName).join("، ")}]` : ""}` });
+      const result = await runAgentChat(`${safeMessage}${attachmentContext}`);
+      await persistChatAssistantReply({ ownerId: ctx.user.id, reply: result.reply, model: result.model }, db.addChatMessageForOwner);
+      return result;
+    }),
+  }),
+  agentCommands: router({
+    create: protectedProcedure.input(z.object({ agentKey: z.string().trim().min(1).max(64), intent: z.enum(["plan", "review", "debug"]), instruction: z.string().trim().min(1).max(2_000) })).mutation(({ ctx, input }) => db.createAgentCommandForOwner(ctx.user.id, input)),
+  }),
+  hosting: router({
+    list: protectedProcedure.query(({ ctx }) => db.listHostingTargetsForOwner(ctx.user.id)),
+    create: protectedProcedure.input(z.object({
+      provider: z.enum(hostingProviderValues),
+      kind: z.enum(hostingTargetKindValues),
+      label: z.string().trim().min(2).max(128),
+      endpoint: z.string().trim().max(2048).optional(),
+      repositoryUrl: z.string().trim().max(2048).optional(),
+      notes: z.string().trim().max(2_000).optional(),
+    })).mutation(({ ctx, input }) => db.createHostingTargetForOwner(ctx.user.id, input)),
+    test: protectedProcedure.input(z.object({ targetId: z.number().int().positive() })).mutation(({ ctx, input }) => db.testHostingTargetForOwner(ctx.user.id, input.targetId)),
+    remove: protectedProcedure.input(z.object({ targetId: z.number().int().positive() })).mutation(({ ctx, input }) => db.removeHostingTargetForOwner(ctx.user.id, input.targetId)),
   }),
   projects: router({
     list: protectedProcedure.query(({ ctx }) => db.listProjectsForOwner(ctx.user.id)),
@@ -253,6 +290,12 @@ export const appRouter = router({
   }),
   operationalHealth: router({
     get: protectedProcedure.query(({ ctx }) => db.getOwnerOperationalHealth(ctx.user.id)),
+    sendOwnerDigest: protectedProcedure.mutation(async ({ ctx }) => {
+      const snapshot = await db.getOwnerOperationalHealth(ctx.user.id);
+      const digest = buildOwnerOperationalDigest(snapshot);
+      const delivered = await notifyOwner({ title: digest.title, content: digest.content });
+      return { delivered, needsAttention: digest.needsAttention, digest };
+    }),
   }),
   approvals: router({
     list: protectedProcedure.input(projectIdInput).query(({ ctx, input }) => db.listProjectApprovals(ctx.user.id, input.projectId)),

@@ -8,6 +8,9 @@ import {
   agents,
   approvals,
   artifacts,
+  agentCommandRequests,
+  chatAttachments,
+  chatMessages,
   contextPackages,
   costEntries,
   councilOpinions,
@@ -21,6 +24,7 @@ import {
   executionPlans,
   isolatedRuntimeBundles,
   isolatedRuntimeRequests,
+  hostingTargets,
   localRunners,
   multiFileBundleTemplates,
   modelCostReservations,
@@ -77,6 +81,9 @@ import { inspectZipStructure, summarizeZipInspection } from "../lib/zip-structur
 import { scanProjectArchiveSensitiveData, summarizeSensitiveDataScan } from "../lib/project-sensitive-data-scanner";
 import { buildPublicApisSearchUrl, parsePublicApisResponse, publicApisOperationFingerprint, PUBLIC_APIS_ORIGIN, type PublicApisSearchInput } from "../lib/public-apis-policy";
 import { storageGetSignedUrl, storagePut } from "./storage";
+import { validateHostingTarget, type HostingProvider, type HostingTargetKind } from "../lib/server-hosting-policy";
+import { runManualHostingCheck } from "./hosting-connectivity-service";
+import { redactAttachmentText, validateChatAttachment, type ChatAttachmentKind } from "../lib/chat-attachment-policy";
 
 let _db: ReturnType<typeof drizzle> | null = null;
 
@@ -90,6 +97,102 @@ export async function getDb() {
     }
   }
   return _db;
+}
+
+export async function listChatMessagesForOwner(ownerId: number) {
+  const db = await getDb();
+  if (!db) return [];
+  return db.select({ id: chatMessages.id, role: chatMessages.role, content: chatMessages.content, model: chatMessages.model, createdAt: chatMessages.createdAt }).from(chatMessages).where(eq(chatMessages.ownerId, ownerId)).orderBy(chatMessages.createdAt).limit(200);
+}
+
+export async function addChatMessageForOwner(input: { ownerId: number; role: "user" | "assistant"; content: string; model?: string | null }) {
+  const db = await getDb();
+  if (!db) throw new Error("قاعدة البيانات غير متاحة لحفظ الدردشة.");
+  await db.insert(chatMessages).values({ ownerId: input.ownerId, role: input.role, content: input.content, model: input.model ?? null });
+}
+
+export async function listChatAttachmentsForOwner(ownerId: number) {
+  const db = await getDb();
+  if (!db) return [];
+  return db.select({ id: chatAttachments.id, fileName: chatAttachments.fileName, mimeType: chatAttachments.mimeType, kind: chatAttachments.kind, byteSize: chatAttachments.byteSize, summary: chatAttachments.summary, createdAt: chatAttachments.createdAt }).from(chatAttachments).where(eq(chatAttachments.ownerId, ownerId)).orderBy(desc(chatAttachments.createdAt)).limit(30);
+}
+
+export async function addChatAttachmentForOwner(input: { ownerId: number; fileName: string; mimeType: string; byteSize: number; base64: string }) {
+  const db = await getDb();
+  if (!db) throw new Error("قاعدة البيانات غير متاحة لحفظ المرفق.");
+  const bytes = Buffer.from(input.base64, "base64");
+  const safe = validateChatAttachment({ fileName: input.fileName, mimeType: input.mimeType, byteSize: input.byteSize, bytes });
+  const stored = await storagePut(`chat/${input.ownerId}/${safe.fileName}`, bytes, safe.mimeType);
+  const [result] = await db.insert(chatAttachments).values({ ownerId: input.ownerId, fileName: safe.fileName, mimeType: safe.mimeType, kind: safe.kind, byteSize: input.byteSize, storageKey: stored.key, summary: safe.summary });
+  const [attachment] = await db.select().from(chatAttachments).where(and(eq(chatAttachments.id, Number(result.insertId)), eq(chatAttachments.ownerId, input.ownerId))).limit(1);
+  if (!attachment) throw new Error("تعذر قراءة المرفق بعد حفظه.");
+  return attachment;
+}
+
+export async function getChatAttachmentContextForOwner(ownerId: number, attachmentIds: number[]) {
+  if (!attachmentIds.length) return [];
+  const db = await getDb();
+  if (!db) return [];
+  const items = await db.select().from(chatAttachments).where(and(eq(chatAttachments.ownerId, ownerId), inArray(chatAttachments.id, attachmentIds))).limit(5);
+  return Promise.all(items.map(async (item) => {
+    if (item.kind !== "text") return { fileName: item.fileName, kind: item.kind as ChatAttachmentKind, summary: item.summary, text: null };
+    const url = await storageGetSignedUrl(item.storageKey);
+    const response = await fetch(url, { redirect: "error" });
+    const text = response.ok ? redactAttachmentText((await response.text()).slice(0, 24_000)) : "";
+    return { fileName: item.fileName, kind: item.kind as ChatAttachmentKind, summary: item.summary, text: text || null };
+  }));
+}
+
+export async function createAgentCommandForOwner(ownerId: number, input: { agentKey: string; intent: "plan" | "review" | "debug"; instruction: string }) {
+  const db = await getDb();
+  if (!db) throw new Error("قاعدة البيانات غير متاحة لحفظ أمر الوكيل.");
+  const agentKey = input.agentKey.trim().slice(0, 64);
+  const instruction = input.instruction.trim().slice(0, 2_000);
+  if (!agentKey || !instruction) throw new Error("حدد الوكيل وتعليمات الأمر أولاً.");
+  const [result] = await db.insert(agentCommandRequests).values({ ownerId, agentKey, intent: input.intent, instruction, status: "queued" });
+  const [command] = await db.select().from(agentCommandRequests).where(and(eq(agentCommandRequests.id, Number(result.insertId)), eq(agentCommandRequests.ownerId, ownerId))).limit(1);
+  if (!command) throw new Error("تعذر حفظ أمر الوكيل.");
+  return command;
+}
+
+export async function listHostingTargetsForOwner(ownerId: number) {
+  const db = await getDb();
+  if (!db) return [];
+  return db.select().from(hostingTargets).where(eq(hostingTargets.ownerId, ownerId)).orderBy(desc(hostingTargets.updatedAt));
+}
+
+export async function createHostingTargetForOwner(ownerId: number, input: { provider: HostingProvider; kind: HostingTargetKind; label: string; endpoint?: string | null; repositoryUrl?: string | null; notes?: string | null }) {
+  const db = await getDb();
+  if (!db) throw new Error("قاعدة البيانات غير متاحة لحفظ إعداد الخادم.");
+  const safeInput = validateHostingTarget(input);
+  const [result] = await db.insert(hostingTargets).values({ ownerId, provider: input.provider, kind: input.kind, ...safeInput, manualOnly: true });
+  const [target] = await db.select().from(hostingTargets).where(and(eq(hostingTargets.id, Number(result.insertId)), eq(hostingTargets.ownerId, ownerId))).limit(1);
+  if (!target) throw new Error("تعذر قراءة إعداد الخادم بعد حفظه.");
+  return target;
+}
+
+export async function removeHostingTargetForOwner(ownerId: number, targetId: number) {
+  const db = await getDb();
+  if (!db) throw new Error("قاعدة البيانات غير متاحة لحذف إعداد الخادم.");
+  await db.delete(hostingTargets).where(and(eq(hostingTargets.id, targetId), eq(hostingTargets.ownerId, ownerId)));
+}
+
+export async function testHostingTargetForOwner(ownerId: number, targetId: number) {
+  const db = await getDb();
+  if (!db) throw new Error("قاعدة البيانات غير متاحة لاختبار الاتصال.");
+  const [target] = await db.select().from(hostingTargets).where(and(eq(hostingTargets.id, targetId), eq(hostingTargets.ownerId, ownerId))).limit(1);
+  if (!target) throw new Error("الخادم غير موجود أو غير مملوك للحساب.");
+  if (target.lastCheckedAt && Date.now() - target.lastCheckedAt.getTime() < 10_000) throw new Error("انتظر بضع ثوانٍ قبل إعادة اختبار الخادم نفسه.");
+  let result: Awaited<ReturnType<typeof runManualHostingCheck>> | { checkStatus: "blocked"; statusCode: null; summary: string; durationMs: number };
+  try {
+    result = await runManualHostingCheck({ provider: target.provider, endpoint: target.endpoint });
+  } catch (error) {
+    const summary = error instanceof Error ? error.message.slice(0, 255) : "حُجب اختبار الاتصال وفق سياسة الأمان.";
+    result = { checkStatus: "blocked", statusCode: null, summary, durationMs: 0 };
+  }
+  const checkedAt = new Date();
+  await db.update(hostingTargets).set({ lastCheckStatus: result.checkStatus, lastCheckCode: result.statusCode, lastCheckSummary: result.summary, lastCheckDurationMs: result.durationMs, lastCheckedAt: checkedAt }).where(and(eq(hostingTargets.id, targetId), eq(hostingTargets.ownerId, ownerId)));
+  return { ...result, checkedAt };
 }
 
 export async function upsertUser(user: InsertUser): Promise<void> {
@@ -1488,7 +1591,8 @@ export async function addTaskDependencyForProject(userId: number, input: { proje
 
 export async function listArtifactsForProject(userId: number, projectId: number) {
   const { db } = await requireOwnedProject(userId, projectId);
-  return db.select().from(artifacts).where(eq(artifacts.projectId, projectId)).orderBy(desc(artifacts.createdAt));
+  const rows = await db.select().from(artifacts).where(eq(artifacts.projectId, projectId)).orderBy(desc(artifacts.createdAt));
+  return rows.map((artifact) => ({ ...artifact, storageUrl: artifact.storageKey ? `/manus-storage/${artifact.storageKey}` : null }));
 }
 
 export async function registerArtifactForProject(userId: number, input: { projectId: number; taskId?: number; name: string; kind: string; reference: string; summary?: string }) {

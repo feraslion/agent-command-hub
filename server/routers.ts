@@ -13,6 +13,8 @@ import { buildTemplates } from "../lib/build-template-registry";
 import { notifyOwner } from "./_core/notification";
 import { buildOwnerOperationalDigest } from "../lib/operational-owner-digest";
 import { runAgentChat } from "./agent-chat-service";
+import { sanitizeAgentChatText } from "../lib/agent-chat-policy";
+import { persistChatAssistantReply } from "./chat-history-service";
 
 const projectIdInput = z.object({ projectId: z.number().int().positive() });
 const taskStatus = z.enum(["pending", "queued", "running", "verifying", "completed", "failed", "debugging", "retrying", "cancelled"]);
@@ -28,7 +30,15 @@ export const appRouter = router({
     }),
   }),
   chat: router({
-    send: protectedProcedure.input(z.object({ message: z.string().trim().min(1).max(2_000) })).mutation(({ input }) => runAgentChat(input.message)),
+    list: protectedProcedure.query(({ ctx }) => db.listChatMessagesForOwner(ctx.user.id)),
+    send: protectedProcedure.input(z.object({ message: z.string().trim().min(1).max(2_000) })).mutation(async ({ ctx, input }) => {
+      const safeMessage = sanitizeAgentChatText(input.message);
+      if (!safeMessage) throw new Error("تعذر حفظ رسالة الدردشة بعد التنقيح.");
+      await db.addChatMessageForOwner({ ownerId: ctx.user.id, role: "user", content: safeMessage });
+      const result = await runAgentChat(safeMessage);
+      await persistChatAssistantReply({ ownerId: ctx.user.id, reply: result.reply, model: result.model }, db.addChatMessageForOwner);
+      return result;
+    }),
   }),
   projects: router({
     list: protectedProcedure.query(({ ctx }) => db.listProjectsForOwner(ctx.user.id)),

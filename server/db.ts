@@ -8,6 +8,7 @@ import {
   agents,
   approvals,
   artifacts,
+  chatMessages,
   contextPackages,
   costEntries,
   councilOpinions,
@@ -90,6 +91,18 @@ export async function getDb() {
     }
   }
   return _db;
+}
+
+export async function listChatMessagesForOwner(ownerId: number) {
+  const db = await getDb();
+  if (!db) return [];
+  return db.select({ id: chatMessages.id, role: chatMessages.role, content: chatMessages.content, model: chatMessages.model, createdAt: chatMessages.createdAt }).from(chatMessages).where(eq(chatMessages.ownerId, ownerId)).orderBy(chatMessages.createdAt).limit(200);
+}
+
+export async function addChatMessageForOwner(input: { ownerId: number; role: "user" | "assistant"; content: string; model?: string | null }) {
+  const db = await getDb();
+  if (!db) throw new Error("قاعدة البيانات غير متاحة لحفظ الدردشة.");
+  await db.insert(chatMessages).values({ ownerId: input.ownerId, role: input.role, content: input.content, model: input.model ?? null });
 }
 
 export async function upsertUser(user: InsertUser): Promise<void> {

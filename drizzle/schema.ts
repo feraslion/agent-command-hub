@@ -58,6 +58,18 @@ export const projectImportSourceValues = ["zip", "repository"] as const;
 export const projectImportStatusValues = ["received", "registered", "rejected"] as const;
 export const projectBuildRequestStatusValues = ["draft", "awaiting_approval", "approved", "rejected", "cancelled"] as const;
 export const projectBuildTargetValues = ["web", "android", "ios", "node", "docker", "custom"] as const;
+export const chatMessageRoleValues = ["user", "assistant"] as const;
+
+export const chatMessages = mysqlTable("chat_messages", {
+  id: int("id").autoincrement().primaryKey(),
+  ownerId: int("owner_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+  role: mysqlEnum("role", chatMessageRoleValues).notNull(),
+  content: text("content").notNull(),
+  model: varchar("model", { length: 128 }),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+}, (table) => [
+  index("chat_messages_owner_created_idx").on(table.ownerId, table.createdAt),
+]);
 
 export const projects = mysqlTable("projects", {
   id: int("id").autoincrement().primaryKey(),

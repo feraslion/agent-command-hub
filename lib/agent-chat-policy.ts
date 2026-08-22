@@ -1,7 +1,11 @@
 import { redactAgentPromptText } from "./agent-model-policy";
 
+export function sanitizeAgentChatText(value: string) {
+  return redactAgentPromptText(value, 2_000);
+}
+
 export function buildAgentChatMessages(message: string) {
-  const safeMessage = redactAgentPromptText(message, 2_000);
+  const safeMessage = sanitizeAgentChatText(message);
   if (!safeMessage) throw new Error("رسالة الدردشة فارغة.");
   return [
     {

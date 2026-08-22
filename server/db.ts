@@ -31,6 +31,7 @@ import {
   projectImports,
   projectReports,
   researchCampaigns,
+  researchAutonomySettings,
   researchQuestions,
   researchSyntheses,
   projects,
@@ -74,6 +75,7 @@ import { verifyPublicRepository } from "../lib/repository-existence-check";
 import { getBuildTemplate } from "../lib/build-template-registry";
 import { inspectZipStructure, summarizeZipInspection } from "../lib/zip-structure-inspector";
 import { scanProjectArchiveSensitiveData, summarizeSensitiveDataScan } from "../lib/project-sensitive-data-scanner";
+import { buildPublicApisSearchUrl, parsePublicApisResponse, publicApisOperationFingerprint, PUBLIC_APIS_ORIGIN, type PublicApisSearchInput } from "../lib/public-apis-policy";
 import { storageGetSignedUrl, storagePut } from "./storage";
 
 let _db: ReturnType<typeof drizzle> | null = null;
@@ -2024,7 +2026,54 @@ export async function createResearchCampaignForProject(userId: number, input: { 
   const campaignId = Number(result.insertId);
   await db.insert(researchQuestions).values(input.questions.map((question) => ({ campaignId, question: question.question, category: question.category, priority: question.priority, status: "pending" as const })));
   await recordExecutionEvent(userId, input.projectId, { actor: "Research Orchestrator", type: "RESEARCH_CAMPAIGN_CREATED", label: "أنشئت حملة بحث مقيدة", detail: `${input.questions.length} أسئلة؛ حد المصادر ${input.maxSources}، ولا توجد موصلات تنفيذ أو بحث خارجي تلقائي.` });
+  const autonomy = await getResearchAutonomySettingsForOwner(userId);
+  if (autonomy.publicApisEnabled) {
+    await runPublicApisAutonomousSearchForProject(userId, { projectId: input.projectId, campaignId, query: input.questions[0]?.question, category: "Development", auth: "No", https: "Yes" });
+  }
   return getResearchCampaignDetailForProject(userId, input.projectId, campaignId);
+}
+
+export async function getResearchAutonomySettingsForOwner(userId: number) {
+  const db = await getDb();
+  if (!db) return { publicApisEnabled: false, operationKeyReady: Boolean(ENV.cookieSecret) };
+  const [settings] = await db.select().from(researchAutonomySettings).where(eq(researchAutonomySettings.ownerId, userId)).limit(1);
+  return { publicApisEnabled: settings?.publicApisEnabled ?? false, operationKeyReady: Boolean(ENV.cookieSecret), enabledAt: settings?.enabledAt ?? null, updatedAt: settings?.updatedAt ?? null };
+}
+
+export async function setResearchAutonomySettingsForOwner(userId: number, publicApisEnabled: boolean) {
+  const db = await getDb();
+  if (!db) throw new Error("قاعدة البيانات غير متاحة لحفظ إعداد البحث الذاتي.");
+  if (publicApisEnabled && !ENV.cookieSecret) throw new Error("لا يتوفر سر خادم لتفعيل مفتاح تشغيل البحث الذاتي.");
+  await db.insert(researchAutonomySettings).values({ ownerId: userId, publicApisEnabled, enabledAt: publicApisEnabled ? new Date() : null }).onDuplicateKeyUpdate({ set: { publicApisEnabled, enabledAt: publicApisEnabled ? new Date() : null } });
+  return getResearchAutonomySettingsForOwner(userId);
+}
+
+export async function runPublicApisAutonomousSearchForProject(userId: number, input: { projectId: number; campaignId: number; questionId?: number; query?: string; category?: string; auth?: "No" | "apiKey" | "OAuth"; https?: "Yes" | "No" }) {
+  const { db, campaign } = await requireOwnedResearchCampaign(userId, input.projectId, input.campaignId);
+  const settings = await getResearchAutonomySettingsForOwner(userId);
+  if (!settings.publicApisEnabled) throw new Error("البحث الذاتي من دليل Public APIs معطل؛ فعّله المالك أولاً.");
+  const [{ count }] = await db.select({ count: sql<number>`count(*)` }).from(evidenceSources).where(and(eq(evidenceSources.campaignId, campaign.id), sql`${evidenceSources.url} like ${`${PUBLIC_APIS_ORIGIN}%`}`));
+  if (Number(count) > 0) throw new Error("اكتمل استعلام Public APIs الذاتي المسموح لهذه الحملة؛ راجع نتائجه أو أنشئ حملة جديدة.");
+  if (input.questionId) {
+    const [question] = await db.select({ id: researchQuestions.id }).from(researchQuestions).where(and(eq(researchQuestions.id, input.questionId), eq(researchQuestions.campaignId, campaign.id))).limit(1);
+    if (!question) throw new Error("سؤال البحث لا ينتمي إلى الحملة المحددة.");
+  }
+  const search = buildPublicApisSearchUrl({ query: input.query, category: input.category, auth: input.auth ?? "No", https: input.https ?? "Yes", pageSize: 8 } satisfies PublicApisSearchInput);
+  const operationFingerprint = publicApisOperationFingerprint(ENV.cookieSecret, { ownerId: userId, projectId: input.projectId, campaignId: campaign.id });
+  const response = await fetch(search, { headers: { Accept: "application/json" }, redirect: "error", signal: AbortSignal.timeout(8_000) });
+  if (response.status === 429) throw new Error(`حدّت واجهة Public APIs الاستعلام؛ أعد المحاولة بعد ${response.headers.get("retry-after") ?? "فترة قصيرة"}.`);
+  if (!response.ok) throw new Error(`تعذر بحث دليل Public APIs (${response.status}).`);
+  const candidates = parsePublicApisResponse(await response.json());
+  const summary = candidates.length ? candidates.slice(0, 6).map((candidate) => `${candidate.name} (${candidate.category}) — ${candidate.auth} — ${candidate.documentationUrl}`).join("\n") : "لم يُرجع الدليل واجهات مطابقة للفلاتر المحددة.";
+  const contentHash = createHash("sha256").update(JSON.stringify(candidates)).digest("hex");
+  const [result] = await db.insert(evidenceSources).values({ projectId: input.projectId, campaignId: campaign.id, questionId: input.questionId ?? null, sourceType: "web", url: search.toString(), title: "دليل Public APIs — بحث ذاتي محكوم", author: "Public APIs", contentHash, trustTier: "untrusted", redactedSummary: summary, instructionRiskDetected: evidenceInstructionRisk(summary) });
+  const sourceId = Number(result.insertId);
+  if (candidates.length) {
+    await db.insert(evidenceClaims).values(candidates.slice(0, 4).map((candidate) => ({ campaignId: campaign.id, sourceId, claim: `واجهة محتملة: ${candidate.name}`, evidenceExcerpt: `${candidate.description || "لا يوجد وصف"} · مصادقة: ${candidate.auth} · HTTPS: ${String(candidate.https)} · ${candidate.documentationUrl}`, relevance: 55, reliability: "untrusted" as const, status: "active" as const })));
+  }
+  if (input.questionId) await db.update(researchQuestions).set({ status: "researched" }).where(eq(researchQuestions.id, input.questionId));
+  await recordExecutionEvent(userId, input.projectId, { actor: "Public APIs Autonomous Research", type: "PUBLIC_APIS_AUTONOMOUS_SEARCH", label: "اكتمل بحث ذاتي محكوم", detail: `بصمة تشغيل ${operationFingerprint}؛ ${candidates.length} واجهة؛ استعلام واحد فقط لهذه الحملة؛ لم يُستخدم أو يُعرض مفتاح API.` });
+  return getResearchCampaignDetailForProject(userId, input.projectId, campaign.id);
 }
 
 function assertSafeEvidenceUrl(url?: string) {

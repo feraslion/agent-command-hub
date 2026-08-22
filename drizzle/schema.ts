@@ -1,4 +1,4 @@
-import { decimal, index, int, mysqlEnum, mysqlTable, text, timestamp, uniqueIndex, varchar } from "drizzle-orm/mysql-core";
+import { boolean, decimal, index, int, mysqlEnum, mysqlTable, text, timestamp, uniqueIndex, varchar } from "drizzle-orm/mysql-core";
 
 export const users = mysqlTable("users", {
   id: int("id").autoincrement().primaryKey(),
@@ -201,6 +201,16 @@ export const engineConnections = mysqlTable("engine_connections", {
   updatedAt: timestamp("updated_at").defaultNow().onUpdateNow().notNull(),
 }, (table) => [
   uniqueIndex("engine_connections_owner_key_unique").on(table.ownerId, table.key),
+]);
+
+export const researchAutonomySettings = mysqlTable("research_autonomy_settings", {
+  id: int("id").autoincrement().primaryKey(),
+  ownerId: int("owner_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+  publicApisEnabled: boolean("public_apis_enabled").default(false).notNull(),
+  enabledAt: timestamp("enabled_at"),
+  updatedAt: timestamp("updated_at").defaultNow().onUpdateNow().notNull(),
+}, (table) => [
+  uniqueIndex("research_autonomy_settings_owner_unique").on(table.ownerId),
 ]);
 
 export const engineSessions = mysqlTable("engine_sessions", {

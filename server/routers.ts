@@ -12,6 +12,7 @@ import { agentModelRoles } from "../lib/agent-model-policy";
 import { buildTemplates } from "../lib/build-template-registry";
 import { notifyOwner } from "./_core/notification";
 import { buildOwnerOperationalDigest } from "../lib/operational-owner-digest";
+import { runAgentChat } from "./agent-chat-service";
 
 const projectIdInput = z.object({ projectId: z.number().int().positive() });
 const taskStatus = z.enum(["pending", "queued", "running", "verifying", "completed", "failed", "debugging", "retrying", "cancelled"]);
@@ -25,6 +26,9 @@ export const appRouter = router({
       ctx.res.clearCookie(COOKIE_NAME, { ...cookieOptions, maxAge: -1 });
       return { success: true } as const;
     }),
+  }),
+  chat: router({
+    send: protectedProcedure.input(z.object({ message: z.string().trim().min(1).max(2_000) })).mutation(({ input }) => runAgentChat(input.message)),
   }),
   projects: router({
     list: protectedProcedure.query(({ ctx }) => db.listProjectsForOwner(ctx.user.id)),

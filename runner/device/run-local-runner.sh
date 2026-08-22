@@ -5,6 +5,7 @@ repository_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 default_config="${repository_root}/runner/device/.env.runner"
 config_path="${default_config}"
 once_requested="false"
+heartbeat_only="false"
 check_config="false"
 scan_directory=""
 scan_project=""
@@ -14,7 +15,7 @@ positional=()
 usage() {
   cat >&2 <<EOF
 Usage:
-  $0 [--config PATH] [--once]
+  $0 [--config PATH] [--once] [--heartbeat-only]
   $0 [--config PATH] --check-config
   $0 [--config PATH] --scan-dir DIRECTORY --project PROJECT_ID [--scan-label LABEL]
   $0 SERVER_URL RUNNER_KEY RUNNER_TOKEN [--once]
@@ -85,6 +86,10 @@ while [[ $# -gt 0 ]]; do
       once_requested="true"
       shift
       ;;
+    --heartbeat-only)
+      heartbeat_only="true"
+      shift
+      ;;
     --check-config)
       check_config="true"
       shift
@@ -148,6 +153,9 @@ if [[ -n "${scan_directory}" || -n "${scan_project}" || -n "${scan_label}" ]]; t
 fi
 if [[ "${AGENTHUB_RUN_ONCE:-false}" == "true" ]]; then
   command+=(--once)
+fi
+if [[ "${heartbeat_only}" == "true" ]]; then
+  command+=(--heartbeat-only)
 fi
 
 exec "${command[@]}"

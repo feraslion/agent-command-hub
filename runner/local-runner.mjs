@@ -36,7 +36,7 @@ const BLOCKED = [
 const MULTI_FILE_BLOCKED = BLOCKED.slice(1);
 
 function usage() {
-  console.error("Usage: node runner/local-runner.mjs --server https://host --runner runner-key --token runner-token [--once] | --preflight | --scan-dir <directory> --project <projectId> [--scan-label <label>]");
+  console.error("Usage: node runner/local-runner.mjs --server https://host --runner runner-key --token runner-token [--once] [--heartbeat-only] | --preflight | --scan-dir <directory> --project <projectId> [--scan-label <label>]");
   process.exitCode = 2;
 }
 
@@ -46,7 +46,7 @@ function readArgs(argv) {
     const key = argv[index];
     if (!key.startsWith("--")) continue;
     const name = key.slice(2);
-    if (name === "once" || name === "preflight") values[name] = true;
+    if (name === "once" || name === "preflight" || name === "heartbeat-only") values[name] = true;
     else values[name] = argv[index + 1];
   }
   return values;
@@ -297,6 +297,10 @@ async function main() {
 
   const tick = async () => {
     await call("/api/local-runner/heartbeat", { capabilities: { profiles: ["node_script", "typescript_lockfile", "typescript_multi_file"], docker: true, typescriptImage: TYPESCRIPT_IMAGE, repositoryScan: true } });
+    if (args["heartbeat-only"]) {
+      console.log("[runner] heartbeat reported; execution claim skipped by heartbeat-only mode.");
+      return false;
+    }
     const claim = await call("/api/local-runner/claim");
     if (!claim.request) return false;
     let result;

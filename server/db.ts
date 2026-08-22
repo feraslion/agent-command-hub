@@ -26,9 +26,12 @@ import {
   modelCostReservations,
   modelUsage,
   plannerTaskProposals,
+  projectBuildRequests,
   projectBriefs,
+  projectImports,
   projectReports,
   researchCampaigns,
+  researchAutonomySettings,
   researchQuestions,
   researchSyntheses,
   projects,
@@ -67,6 +70,13 @@ import type { PlannerInterpretation } from "../lib/planner-output-interpreter";
 import { buildPlannerTaskProposals, parsePlannerProposalCriteria } from "../lib/planner-task-proposals";
 import { assertEnginePlanningOnly, defaultEngineCapabilities, evidenceInstructionRisk, trustTierForSourceType, type EngineConnectionKind, type ResearchSourceType } from "../lib/research-fabric-policy";
 import { buildResearchSynthesis } from "../lib/research-synthesis";
+import { validateBuildRequest, validateRepositoryReference, validateZipArchive } from "../lib/project-intake-policy";
+import { verifyPublicRepository } from "../lib/repository-existence-check";
+import { getBuildTemplate } from "../lib/build-template-registry";
+import { inspectZipStructure, summarizeZipInspection } from "../lib/zip-structure-inspector";
+import { scanProjectArchiveSensitiveData, summarizeSensitiveDataScan } from "../lib/project-sensitive-data-scanner";
+import { buildPublicApisSearchUrl, parsePublicApisResponse, publicApisOperationFingerprint, PUBLIC_APIS_ORIGIN, type PublicApisSearchInput } from "../lib/public-apis-policy";
+import { storageGetSignedUrl, storagePut } from "./storage";
 
 let _db: ReturnType<typeof drizzle> | null = null;
 
@@ -1790,6 +1800,87 @@ export async function recordExecutionEvent(userId: number, projectId: number, in
   return Number(result.insertId);
 }
 
+export async function listProjectIntakeForOwner(userId: number, projectId: number) {
+  const { db } = await requireOwnedProject(userId, projectId);
+  const [imports, buildRequests, repositoryLink] = await Promise.all([
+    db.select().from(projectImports).where(eq(projectImports.projectId, projectId)).orderBy(desc(projectImports.createdAt)).limit(30),
+    db.select().from(projectBuildRequests).where(eq(projectBuildRequests.projectId, projectId)).orderBy(desc(projectBuildRequests.createdAt)).limit(30),
+    db.select().from(projectRepositoryLinks).where(eq(projectRepositoryLinks.projectId, projectId)).limit(1),
+  ]);
+  return { imports, buildRequests, repositoryLink: repositoryLink[0] ?? null, policy: { execution: "blocked", clone: "blocked", push: "blocked", merge: "blocked", archiveExtraction: "blocked" } };
+}
+
+export async function importProjectZipForOwner(userId: number, input: { projectId: number; fileName: string; byteSize: number; bytes: Uint8Array }) {
+  const validated = validateZipArchive(input);
+  const { db } = await requireOwnedProject(userId, input.projectId);
+  const inspection = inspectZipStructure(input.bytes);
+  const inspectionSummary = summarizeZipInspection(inspection);
+  const securityScan = scanProjectArchiveSensitiveData(input.bytes);
+  const securityScanSummary = summarizeSensitiveDataScan(securityScan);
+  const stored = await storagePut(`project-imports/${userId}/${input.projectId}/${validated.safeName}`, input.bytes, "application/zip");
+  const summary = `أرشيف ZIP محفوظ للمراجعة فقط (${Math.ceil(validated.byteSize / 1024)}KB). ${inspectionSummary} فحص الأمان: ${securityScan.status === "clean" ? "سليم" : securityScan.status === "blocked" ? "محجوب" : "يتطلب مراجعة"}.`;
+  const [result] = await db.insert(projectImports).values({ projectId: input.projectId, ownerId: userId, source: "zip", status: "received", displayName: validated.safeName, storageKey: stored.key, byteSize: validated.byteSize, summary, inspectionSummary, securityScanStatus: securityScan.status, securityScanSummary });
+  await db.insert(artifacts).values({ projectId: input.projectId, name: validated.safeName, kind: "project_archive", storageKey: stored.key, summary });
+  await recordExecutionEvent(userId, input.projectId, { actor: "بوابة أمان المشروع", type: "PROJECT_ARCHIVE_SENSITIVE_DATA_SCAN", label: "اكتمل فحص أسرار الأرشيف", detail: `النتيجة ${securityScan.status}; الملفات المفحوصة ${securityScan.scannedFiles}; النتائج المنقحة ${securityScan.findings.length}. لم تحفظ قيم سرية.` });
+  await recordExecutionEvent(userId, input.projectId, { actor: "مالك المشروع", type: "PROJECT_ARCHIVE_RECEIVED", label: "تم حفظ أرشيف مشروع", detail: summary });
+  return (await db.select().from(projectImports).where(eq(projectImports.id, Number(result.insertId))).limit(1))[0];
+}
+
+export async function rescanProjectZipForOwner(userId: number, input: { projectId: number; importId: number }) {
+  const { db } = await requireOwnedProject(userId, input.projectId);
+  const [source] = await db.select().from(projectImports).where(and(eq(projectImports.id, input.importId), eq(projectImports.projectId, input.projectId), eq(projectImports.ownerId, userId))).limit(1);
+  if (!source || source.source !== "zip" || !source.storageKey || !source.byteSize) throw new Error("لا يتوفر أرشيف ZIP صالح لإعادة الفحص.");
+  const response = await fetch(await storageGetSignedUrl(source.storageKey), { redirect: "error" });
+  if (!response.ok) throw new Error("تعذر الوصول إلى الأرشيف المخزن لإعادة الفحص.");
+  const bytes = new Uint8Array(await response.arrayBuffer());
+  validateZipArchive({ fileName: source.displayName, byteSize: source.byteSize, bytes });
+  const scan = scanProjectArchiveSensitiveData(bytes);
+  const securityScanSummary = summarizeSensitiveDataScan(scan);
+  await db.update(projectImports).set({ securityScanStatus: scan.status, securityScanSummary }).where(eq(projectImports.id, source.id));
+  await recordExecutionEvent(userId, input.projectId, { actor: "بوابة أمان المشروع", type: "PROJECT_ARCHIVE_SENSITIVE_DATA_RESCAN", label: "أعيد فحص أسرار الأرشيف", detail: `النتيجة ${scan.status}; الملفات المفحوصة ${scan.scannedFiles}; النتائج المنقحة ${scan.findings.length}. لم تحفظ قيم سرية.` });
+  return (await db.select().from(projectImports).where(eq(projectImports.id, source.id)).limit(1))[0];
+}
+
+export async function registerProjectRepositoryForOwner(userId: number, input: { projectId: number; remoteUrl: string; repositoryName?: string; defaultBranch: string }) {
+  const repository = validateRepositoryReference(input);
+  const { db } = await requireOwnedProject(userId, input.projectId);
+  await db.insert(projectRepositoryLinks).values({ projectId: input.projectId, remoteUrl: repository.remoteUrl, repositoryName: repository.repositoryName, defaultBranch: repository.defaultBranch, status: "unlinked" }).onDuplicateKeyUpdate({ set: { remoteUrl: repository.remoteUrl, repositoryName: repository.repositoryName, defaultBranch: repository.defaultBranch, status: "unlinked" } });
+  const summary = `مرجع ${repository.provider} مسجل للمراجعة فقط؛ لم يُستنسخ المستودع ولم تُستخدم بيانات اعتماد.`;
+  const [result] = await db.insert(projectImports).values({ projectId: input.projectId, ownerId: userId, source: "repository", status: "registered", displayName: repository.repositoryName, remoteUrl: repository.remoteUrl, provider: repository.provider, summary });
+  await recordExecutionEvent(userId, input.projectId, { actor: "مالك المشروع", type: "REPOSITORY_REFERENCE_REGISTERED", label: "تم تسجيل مرجع مستودع", detail: summary });
+  return (await db.select().from(projectImports).where(eq(projectImports.id, Number(result.insertId))).limit(1))[0];
+}
+
+export async function verifyProjectRepositoryForOwner(userId: number, input: { projectId: number; remoteUrl: string; defaultBranch: string }) {
+  await requireOwnedProject(userId, input.projectId);
+  const result = await verifyPublicRepository(input);
+  await recordExecutionEvent(userId, input.projectId, {
+    actor: "مالك المشروع",
+    type: "REPOSITORY_PUBLIC_CHECK",
+    label: "فحص وجود مستودع عام",
+    detail: `فحص صريح لمستودع ${result.provider}: ${result.status}. ${result.message}`,
+  });
+  return result;
+}
+
+export async function createProjectBuildRequestForOwner(userId: number, input: { projectId: number; importId?: number; target: string; title: string; summary: string; templateKey: string }) {
+  const build = validateBuildRequest(input);
+  const template = getBuildTemplate(input.templateKey);
+  if (!template.targets.includes(build.target)) throw new Error("هدف البناء لا يتوافق مع القالب المختار.");
+  const { db } = await requireOwnedProject(userId, input.projectId);
+  if (input.importId) {
+    const [source] = await db.select({ id: projectImports.id, securityScanStatus: projectImports.securityScanStatus }).from(projectImports).where(and(eq(projectImports.id, input.importId), eq(projectImports.projectId, input.projectId))).limit(1);
+    if (!source) throw new Error("مصدر المشروع غير موجود ضمن هذا المشروع.");
+    if (source.securityScanStatus === "pending") throw new Error("لا يمكن طلب البناء قبل فحص أسرار وبيانات المصدر.");
+    if (source.securityScanStatus === "blocked") throw new Error("حُجب طلب البناء لأن فحص المصدر عثر على أسرار أو بيانات حساسة عالية الخطورة.");
+  }
+  const [approvalResult] = await db.insert(approvals).values({ projectId: input.projectId, requestedBy: "منصة استيراد المشروع", title: `اعتماد طلب بناء: ${build.title}`, detail: `قالب البناء: ${template.name}. طلب تخطيط لهدف ${build.target}. لا ينفذ هذا الإصدار أي بناء أو رفع؛ الاعتماد يسجل قراراً فقط. ${build.summary}`, impact: `يتطلب بيئة بناء محلية مقيدة بعد إثبات Runner. الفحوص المتوقعة: ${template.preflight.join("، ")}.`, level: "approval" });
+  const approvalId = Number(approvalResult.insertId);
+  const [result] = await db.insert(projectBuildRequests).values({ projectId: input.projectId, importId: input.importId ?? null, requestedByUserId: userId, target: build.target, templateKey: template.key, status: "awaiting_approval", title: build.title, summary: build.summary, approvalId });
+  await recordExecutionEvent(userId, input.projectId, { actor: "مالك المشروع", type: "BUILD_REQUEST_PLANNED", label: "تم تخطيط طلب بناء", detail: `القالب ${template.key} والهدف ${build.target} بانتظار اعتماد صريح؛ لا يوجد تنفيذ أو رفع.` });
+  return (await db.select().from(projectBuildRequests).where(eq(projectBuildRequests.id, Number(result.insertId))).limit(1))[0];
+}
+
 export async function listProjectApprovals(userId: number, projectId: number) {
   const { db } = await requireOwnedProject(userId, projectId);
   return db.select().from(approvals).where(eq(approvals.projectId, projectId)).orderBy(desc(approvals.createdAt));
@@ -1935,7 +2026,54 @@ export async function createResearchCampaignForProject(userId: number, input: { 
   const campaignId = Number(result.insertId);
   await db.insert(researchQuestions).values(input.questions.map((question) => ({ campaignId, question: question.question, category: question.category, priority: question.priority, status: "pending" as const })));
   await recordExecutionEvent(userId, input.projectId, { actor: "Research Orchestrator", type: "RESEARCH_CAMPAIGN_CREATED", label: "أنشئت حملة بحث مقيدة", detail: `${input.questions.length} أسئلة؛ حد المصادر ${input.maxSources}، ولا توجد موصلات تنفيذ أو بحث خارجي تلقائي.` });
+  const autonomy = await getResearchAutonomySettingsForOwner(userId);
+  if (autonomy.publicApisEnabled) {
+    await runPublicApisAutonomousSearchForProject(userId, { projectId: input.projectId, campaignId, query: input.questions[0]?.question, category: "Development", auth: "No", https: "Yes" });
+  }
   return getResearchCampaignDetailForProject(userId, input.projectId, campaignId);
+}
+
+export async function getResearchAutonomySettingsForOwner(userId: number) {
+  const db = await getDb();
+  if (!db) return { publicApisEnabled: false, operationKeyReady: Boolean(ENV.cookieSecret) };
+  const [settings] = await db.select().from(researchAutonomySettings).where(eq(researchAutonomySettings.ownerId, userId)).limit(1);
+  return { publicApisEnabled: settings?.publicApisEnabled ?? false, operationKeyReady: Boolean(ENV.cookieSecret), enabledAt: settings?.enabledAt ?? null, updatedAt: settings?.updatedAt ?? null };
+}
+
+export async function setResearchAutonomySettingsForOwner(userId: number, publicApisEnabled: boolean) {
+  const db = await getDb();
+  if (!db) throw new Error("قاعدة البيانات غير متاحة لحفظ إعداد البحث الذاتي.");
+  if (publicApisEnabled && !ENV.cookieSecret) throw new Error("لا يتوفر سر خادم لتفعيل مفتاح تشغيل البحث الذاتي.");
+  await db.insert(researchAutonomySettings).values({ ownerId: userId, publicApisEnabled, enabledAt: publicApisEnabled ? new Date() : null }).onDuplicateKeyUpdate({ set: { publicApisEnabled, enabledAt: publicApisEnabled ? new Date() : null } });
+  return getResearchAutonomySettingsForOwner(userId);
+}
+
+export async function runPublicApisAutonomousSearchForProject(userId: number, input: { projectId: number; campaignId: number; questionId?: number; query?: string; category?: string; auth?: "No" | "apiKey" | "OAuth"; https?: "Yes" | "No" }) {
+  const { db, campaign } = await requireOwnedResearchCampaign(userId, input.projectId, input.campaignId);
+  const settings = await getResearchAutonomySettingsForOwner(userId);
+  if (!settings.publicApisEnabled) throw new Error("البحث الذاتي من دليل Public APIs معطل؛ فعّله المالك أولاً.");
+  const [{ count }] = await db.select({ count: sql<number>`count(*)` }).from(evidenceSources).where(and(eq(evidenceSources.campaignId, campaign.id), sql`${evidenceSources.url} like ${`${PUBLIC_APIS_ORIGIN}%`}`));
+  if (Number(count) > 0) throw new Error("اكتمل استعلام Public APIs الذاتي المسموح لهذه الحملة؛ راجع نتائجه أو أنشئ حملة جديدة.");
+  if (input.questionId) {
+    const [question] = await db.select({ id: researchQuestions.id }).from(researchQuestions).where(and(eq(researchQuestions.id, input.questionId), eq(researchQuestions.campaignId, campaign.id))).limit(1);
+    if (!question) throw new Error("سؤال البحث لا ينتمي إلى الحملة المحددة.");
+  }
+  const search = buildPublicApisSearchUrl({ query: input.query, category: input.category, auth: input.auth ?? "No", https: input.https ?? "Yes", pageSize: 8 } satisfies PublicApisSearchInput);
+  const operationFingerprint = publicApisOperationFingerprint(ENV.cookieSecret, { ownerId: userId, projectId: input.projectId, campaignId: campaign.id });
+  const response = await fetch(search, { headers: { Accept: "application/json" }, redirect: "error", signal: AbortSignal.timeout(8_000) });
+  if (response.status === 429) throw new Error(`حدّت واجهة Public APIs الاستعلام؛ أعد المحاولة بعد ${response.headers.get("retry-after") ?? "فترة قصيرة"}.`);
+  if (!response.ok) throw new Error(`تعذر بحث دليل Public APIs (${response.status}).`);
+  const candidates = parsePublicApisResponse(await response.json());
+  const summary = candidates.length ? candidates.slice(0, 6).map((candidate) => `${candidate.name} (${candidate.category}) — ${candidate.auth} — ${candidate.documentationUrl}`).join("\n") : "لم يُرجع الدليل واجهات مطابقة للفلاتر المحددة.";
+  const contentHash = createHash("sha256").update(JSON.stringify(candidates)).digest("hex");
+  const [result] = await db.insert(evidenceSources).values({ projectId: input.projectId, campaignId: campaign.id, questionId: input.questionId ?? null, sourceType: "web", url: search.toString(), title: "دليل Public APIs — بحث ذاتي محكوم", author: "Public APIs", contentHash, trustTier: "untrusted", redactedSummary: summary, instructionRiskDetected: evidenceInstructionRisk(summary) });
+  const sourceId = Number(result.insertId);
+  if (candidates.length) {
+    await db.insert(evidenceClaims).values(candidates.slice(0, 4).map((candidate) => ({ campaignId: campaign.id, sourceId, claim: `واجهة محتملة: ${candidate.name}`, evidenceExcerpt: `${candidate.description || "لا يوجد وصف"} · مصادقة: ${candidate.auth} · HTTPS: ${String(candidate.https)} · ${candidate.documentationUrl}`, relevance: 55, reliability: "untrusted" as const, status: "active" as const })));
+  }
+  if (input.questionId) await db.update(researchQuestions).set({ status: "researched" }).where(eq(researchQuestions.id, input.questionId));
+  await recordExecutionEvent(userId, input.projectId, { actor: "Public APIs Autonomous Research", type: "PUBLIC_APIS_AUTONOMOUS_SEARCH", label: "اكتمل بحث ذاتي محكوم", detail: `بصمة تشغيل ${operationFingerprint}؛ ${candidates.length} واجهة؛ استعلام واحد فقط لهذه الحملة؛ لم يُستخدم أو يُعرض مفتاح API.` });
+  return getResearchCampaignDetailForProject(userId, input.projectId, campaign.id);
 }
 
 function assertSafeEvidenceUrl(url?: string) {

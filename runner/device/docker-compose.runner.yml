@@ -34,3 +34,37 @@ services:
       options:
         max-size: 1m
         max-file: "3"
+  agenthub-runner-monitor:
+    build:
+      context: ../..
+      dockerfile: runner/device/Dockerfile.local-runner
+    image: agenthub/local-runner:0.1
+    profiles:
+      - monitor
+    init: true
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,noexec,size=32m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 64
+    mem_limit: 256m
+    cpus: 0.25
+    volumes:
+      - type: bind
+        source: /var/run/docker.sock
+        target: /var/run/docker.sock
+      - type: bind
+        source: ./.env.runner
+        target: /opt/agenthub/runner/device/.env.runner
+        read_only: true
+    environment:
+      AGENTHUB_HEARTBEAT_INTERVAL_SECONDS: ${AGENTHUB_HEARTBEAT_INTERVAL_SECONDS:-60}
+    entrypoint: ["/opt/agenthub/runner/device/watch-runner-heartbeat.sh"]
+    logging:
+      options:
+        max-size: 1m
+        max-file: "3"

@@ -1,0 +1,13 @@
+FROM node:22-alpine
+
+RUN apk add --no-cache docker-cli
+
+WORKDIR /opt/agenthub
+
+COPY runner/local-runner.mjs runner/docker-support.mjs ./runner/
+COPY runner/device/run-local-runner.sh ./runner/device/run-local-runner.sh
+COPY runner/device/watch-runner-heartbeat.sh ./runner/device/watch-runner-heartbeat.sh
+
+RUN chmod 0555 ./runner/device/run-local-runner.sh ./runner/device/watch-runner-heartbeat.sh
+
+ENTRYPOINT ["/opt/agenthub/runner/device/run-local-runner.sh"]

@@ -1,0 +1,70 @@
+services:
+  agenthub-runner:
+    build:
+      context: ../..
+      dockerfile: runner/device/Dockerfile.local-runner
+    image: agenthub/local-runner:0.1
+    init: true
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,noexec,size=32m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128
+    mem_limit: 384m
+    cpus: 0.50
+    volumes:
+      - type: bind
+        source: /var/run/docker.sock
+        target: /var/run/docker.sock
+      - type: bind
+        source: ./.env.runner
+        target: /opt/agenthub/runner/device/.env.runner
+        read_only: true
+      - type: bind
+        source: ${AGENTHUB_RUNNER_HOST_WORKSPACE_ROOT}
+        target: /runner-work
+    environment:
+      AGENTHUB_RUNNER_WORKSPACE_ROOT: /runner-work
+      AGENTHUB_RUNNER_HOST_WORKSPACE_ROOT: ${AGENTHUB_RUNNER_HOST_WORKSPACE_ROOT}
+    logging:
+      options:
+        max-size: 1m
+        max-file: "3"
+  agenthub-runner-monitor:
+    build:
+      context: ../..
+      dockerfile: runner/device/Dockerfile.local-runner
+    image: agenthub/local-runner:0.1
+    profiles:
+      - monitor
+    init: true
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,noexec,size=32m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 64
+    mem_limit: 256m
+    cpus: 0.25
+    volumes:
+      - type: bind
+        source: /var/run/docker.sock
+        target: /var/run/docker.sock
+      - type: bind
+        source: ./.env.runner
+        target: /opt/agenthub/runner/device/.env.runner
+        read_only: true
+    environment:
+      AGENTHUB_HEARTBEAT_INTERVAL_SECONDS: ${AGENTHUB_HEARTBEAT_INTERVAL_SECONDS:-60}
+    entrypoint: ["/opt/agenthub/runner/device/watch-runner-heartbeat.sh"]
+    logging:
+      options:
+        max-size: 1m
+        max-file: "3"

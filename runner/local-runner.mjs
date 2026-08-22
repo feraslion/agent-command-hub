@@ -33,9 +33,10 @@ const BLOCKED = [
   /\b(?:http|https|net|tls|dgram|cluster|worker_threads|vm|fs)\b/u,
   /\b(?:eval|Function)\s*\(/u,
 ];
+const MULTI_FILE_BLOCKED = BLOCKED.slice(1);
 
 function usage() {
-  console.error("Usage: node runner/local-runner.mjs --server https://host --runner runner-key --token runner-token [--once] | --preflight | --scan-dir <directory> --project <projectId> [--scan-label <label>]");
+  console.error("Usage: node runner/local-runner.mjs --server https://host --runner runner-key --token runner-token [--once] [--heartbeat-only] | --preflight | --scan-dir <directory> --project <projectId> [--scan-label <label>]");
   process.exitCode = 2;
 }
 
@@ -45,7 +46,7 @@ function readArgs(argv) {
     const key = argv[index];
     if (!key.startsWith("--")) continue;
     const name = key.slice(2);
-    if (name === "once" || name === "preflight") values[name] = true;
+    if (name === "once" || name === "preflight" || name === "heartbeat-only") values[name] = true;
     else values[name] = argv[index + 1];
   }
   return values;
@@ -86,7 +87,7 @@ function assertPayload(payload) {
     seen.add(filePath);
     const size = Buffer.byteLength(file.content, "utf8");
     totalBytes += size;
-    if (!file.content.trim() || size > 24_000 || BLOCKED.some((pattern) => pattern.test(file.content)) || /\b(?:require|import)\s*\(/u.test(file.content) || /\bimport\s+(?:type\s+)?(?:[^"']+?\s+from\s+)?["'](?!\.\.?\/)/u.test(file.content)) {
+    if (!file.content.trim() || size > 24_000 || MULTI_FILE_BLOCKED.some((pattern) => pattern.test(file.content)) || /\b(?:require|import)\s*\(/u.test(file.content) || /\bimport\s+(?:type\s+)?(?:[^"']+?\s+from\s+)?["'](?!\.\.?\/)/u.test(file.content)) {
       throw new Error("Runner rejected prohibited code in the multi-file bundle.");
     }
     return { path: filePath, content: file.content };
@@ -140,9 +141,29 @@ async function assertDockerReady() {
   console.log(`[runner] Docker ready (server ${daemon.stdout.trim()}, images verified).`);
 }
 
+async function createExecutionWorkspace() {
+  const containerRoot = process.env.AGENTHUB_RUNNER_WORKSPACE_ROOT;
+  const hostRoot = process.env.AGENTHUB_RUNNER_HOST_WORKSPACE_ROOT;
+  if (Boolean(containerRoot) !== Boolean(hostRoot)) {
+    throw new Error("Runner workspace mapping requires both container and host workspace roots.");
+  }
+  if (!containerRoot || !hostRoot) {
+    const workspace = await mkdtemp(path.join(tmpdir(), "agenthub-runner-"));
+    return { workspace, dockerWorkspace: workspace };
+  }
+  if (!path.isAbsolute(containerRoot) || !path.isAbsolute(hostRoot)) {
+    throw new Error("Runner workspace roots must be absolute paths.");
+  }
+  await mkdir(containerRoot, { recursive: true, mode: 0o700 });
+  const name = `agenthub-runner-${randomUUID()}`;
+  const workspace = path.join(containerRoot, name);
+  await mkdir(workspace, { recursive: false, mode: 0o700 });
+  return { workspace, dockerWorkspace: path.join(hostRoot, name) };
+}
+
 async function execute(payload) {
   const { normalized: targetPath, profile, files } = assertPayload(payload);
-  const workspace = await mkdtemp(path.join(tmpdir(), "agenthub-runner-"));
+  const { workspace, dockerWorkspace } = await createExecutionWorkspace();
   const containerName = `agenthub-${payload.requestId}-${randomUUID().slice(0, 8)}`;
   const startedAt = Date.now();
 
@@ -172,7 +193,7 @@ async function execute(payload) {
       "--cpus", profile === "typescript_multi_file" ? "0.75" : "0.5",
       "--user", "1000:1000",
       "--workdir", "/workspace",
-      "--mount", `type=bind,src=${workspace},dst=/workspace,readonly`,
+      "--mount", `type=bind,src=${dockerWorkspace},dst=/workspace,readonly`,
       profile === "typescript_lockfile" ? TYPESCRIPT_IMAGE : NODE_IMAGE,
       ...runtimeCommand,
     ];
@@ -276,6 +297,10 @@ async function main() {
 
   const tick = async () => {
     await call("/api/local-runner/heartbeat", { capabilities: { profiles: ["node_script", "typescript_lockfile", "typescript_multi_file"], docker: true, typescriptImage: TYPESCRIPT_IMAGE, repositoryScan: true } });
+    if (args["heartbeat-only"]) {
+      console.log("[runner] heartbeat reported; execution claim skipped by heartbeat-only mode.");
+      return false;
+    }
     const claim = await call("/api/local-runner/claim");
     if (!claim.request) return false;
     let result;

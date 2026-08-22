@@ -1,0 +1,145 @@
+import { useMemo, useState } from "react";
+import { ActivityIndicator, Alert, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
+import { useLocalSearchParams, useRouter } from "expo-router";
+import * as DocumentPicker from "expo-document-picker";
+import { File as ExpoFile } from "expo-file-system";
+import MaterialCommunityIcons from "@expo/vector-icons/MaterialCommunityIcons";
+import * as Clipboard from "expo-clipboard";
+import { ScreenContainer } from "@/components/screen-container";
+import { useColors } from "@/hooks/use-colors";
+import { trpc } from "@/lib/trpc";
+import { MAX_PROJECT_ARCHIVE_BYTES } from "@/lib/project-intake-policy";
+import { previewRepositoryUrl } from "@/lib/repository-url-preview";
+
+const targets = ["web", "android", "ios", "node", "docker", "custom"] as const;
+const targetLabels: Record<(typeof targets)[number], string> = { web: "ويب", android: "Android", ios: "iOS", node: "Node.js", docker: "Docker", custom: "مخصص" };
+type SecurityScanSummary = { status: "clean" | "review_required" | "blocked"; scannedFiles: number; skippedFiles: number; counts: { critical: number; high: number; medium: number }; findings: { category: string; filePath: string; line?: number }[]; warnings: string[] };
+
+function parseSecurityScanSummary(value: string | null) {
+  if (!value) return null;
+  try {
+    const parsed = JSON.parse(value) as SecurityScanSummary;
+    return parsed?.status && parsed.counts && Array.isArray(parsed.findings) ? parsed : null;
+  } catch { return null; }
+}
+
+export default function ProjectIntakeScreen() {
+  const colors = useColors();
+  const router = useRouter();
+  const params = useLocalSearchParams<{ projectId?: string; projectName?: string }>();
+  const projectId = Number(params.projectId);
+  const projectName = params.projectName ?? "المشروع";
+  const validProjectId = Number.isInteger(projectId) && projectId > 0;
+  const utils = trpc.useUtils();
+  const overview = trpc.projectIntake.overview.useQuery({ projectId }, { enabled: validProjectId });
+  const buildTemplatesQuery = trpc.projectIntake.buildTemplates.useQuery(undefined, { enabled: validProjectId });
+  const [remoteUrl, setRemoteUrl] = useState("");
+  const [branch, setBranch] = useState("main");
+  const [title, setTitle] = useState("بناء تجريبي محكوم");
+  const [summary, setSummary] = useState("تخطيط بناء بعد مراجعة مصدر المشروع واعتماد المالك.");
+  const [target, setTarget] = useState<(typeof targets)[number]>("android");
+  const [templateKey, setTemplateKey] = useState<"expo-mobile" | "node-service" | "docker-image">("expo-mobile");
+  const repositoryPreview = useMemo(() => previewRepositoryUrl(remoteUrl), [remoteUrl]);
+  const latestImport = overview.data?.imports[0];
+  const latestImportId = latestImport?.id;
+  const latestScanCanProceed = latestImport?.securityScanStatus === "clean" || latestImport?.securityScanStatus === "review_required";
+  const selectedTemplate = buildTemplatesQuery.data?.find((item) => item.key === templateKey);
+  const refresh = () => utils.projectIntake.overview.invalidate({ projectId });
+  const archiveMutation = trpc.projectIntake.importZip.useMutation({ onSuccess: refresh });
+  const scanMutation = trpc.projectIntake.scanZip.useMutation({ onSuccess: refresh });
+  const repositoryMutation = trpc.projectIntake.registerRepository.useMutation({ onSuccess: refresh });
+  const repositoryCheckMutation = trpc.projectIntake.verifyRepository.useMutation();
+  const buildMutation = trpc.projectIntake.requestBuild.useMutation({ onSuccess: refresh });
+  const [repositoryCheck, setRepositoryCheck] = useState<{ status: string; message: string } | null>(null);
+  const busy = archiveMutation.isPending || scanMutation.isPending || repositoryMutation.isPending || repositoryCheckMutation.isPending || buildMutation.isPending;
+  const notice = useMemo(() => archiveMutation.error?.message || scanMutation.error?.message || repositoryMutation.error?.message || repositoryCheckMutation.error?.message || buildMutation.error?.message || "", [archiveMutation.error, scanMutation.error, repositoryMutation.error, repositoryCheckMutation.error, buildMutation.error]);
+
+  const pasteRepositoryUrl = async () => {
+    try {
+      const pasted = (await Clipboard.getStringAsync()).trim();
+      if (!pasted) return Alert.alert("الحافظة فارغة", "انسخ رابط مستودع عام ثم حاول مرة أخرى.");
+      setRepositoryCheck(null);
+      setRemoteUrl(pasted);
+    } catch {
+      Alert.alert("تعذر اللصق", "اسمح بالوصول إلى الحافظة أو ألصق الرابط يدوياً.");
+    }
+  };
+
+  const confirmRepositoryCheck = () => {
+    if (repositoryPreview.state !== "ready") return;
+    Alert.alert("فحص وجود المستودع", "سيُرسل طلب GET واحد فقط إلى واجهة المنصة العامة للتأكد من وجود المستودع. لن يُستنسخ المشروع ولن تُستخدم بيانات اعتماد.", [
+      { text: "إلغاء", style: "cancel" },
+      { text: "فحص عام", onPress: () => repositoryCheckMutation.mutate({ projectId, remoteUrl: repositoryPreview.preview.normalizedUrl, defaultBranch: branch || "main", confirm: true }, { onSuccess: setRepositoryCheck }) },
+    ]);
+  };
+
+  const chooseZip = async () => {
+    try {
+      const result = await DocumentPicker.getDocumentAsync({ type: ["application/zip", "application/x-zip-compressed"], copyToCacheDirectory: true, multiple: false });
+      if (result.canceled) return;
+      const asset = result.assets[0];
+      const file = new ExpoFile(asset.uri);
+      const size = asset.size ?? file.size;
+      if (!size || size > MAX_PROJECT_ARCHIVE_BYTES) {
+        Alert.alert("حجم غير مدعوم", "يمكن استيراد أرشيف ZIP حتى 8MB فقط في هذا الإصدار.");
+        return;
+      }
+      const base64 = await file.base64();
+      archiveMutation.mutate({ projectId, fileName: asset.name, byteSize: size, base64 });
+    } catch {
+      Alert.alert("تعذر قراءة الأرشيف", "تحقق من أن ملف ZIP متاح للجهاز ثم أعد المحاولة.");
+    }
+  };
+
+  if (!validProjectId) return <ScreenContainer className="p-5"><Text style={[styles.error, { color: colors.error }]}>معرّف المشروع غير صالح.</Text></ScreenContainer>;
+  return (
+    <ScreenContainer className="px-5" containerClassName="bg-background">
+      <ScrollView contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
+        <Pressable onPress={() => router.back()} style={({ pressed }) => [styles.back, { borderColor: colors.border }, pressed && styles.pressed]}><Text style={[styles.backText, { color: colors.primary }]}>العودة إلى المشاريع</Text></Pressable>
+        <Text style={[styles.eyebrow, { color: colors.primary }]}>بوابة استيراد محكومة</Text>
+        <Text style={[styles.heading, { color: colors.foreground }]}>مصدر وبناء المشروع</Text>
+        <Text style={[styles.subheading, { color: colors.muted }]}>{projectName} · يحفظ هذا المسار الأرشيف أو مرجع المستودع، ويفحص محتوى ZIP النصي داخل الذاكرة بلا تنفيذ أو حفظ للقيم السرية، ثم يخطط طلب البناء فقط.</Text>
+
+        <Section title="استيراد أرشيف ZIP" colors={colors}>
+          <Text style={[styles.body, { color: colors.muted }]}>حد الحجم 8MB. يفحص التطبيق الأرشيف وملفاته النصية داخل الذاكرة لكشف الأسرار، ولا يعرض أو يحفظ القيم المطابقة.</Text>
+          <Pressable disabled={busy} onPress={chooseZip} style={({ pressed }) => [styles.primaryButton, { backgroundColor: colors.primary }, (pressed || busy) && styles.pressed]}><Text style={styles.primaryText}>{archiveMutation.isPending ? "جارٍ حفظ الأرشيف…" : "اختيار ملف ZIP"}</Text></Pressable>
+        </Section>
+
+        <Section title="تسجيل مرجع مستودع" colors={colors}>
+          <View style={styles.repositoryInputRow}><TextInput value={remoteUrl} onChangeText={(value) => { setRepositoryCheck(null); setRemoteUrl(value); }} autoCapitalize="none" placeholder="https://github.com/owner/repository" placeholderTextColor={colors.muted} style={[styles.repositoryInput, styles.input, { color: colors.foreground, borderColor: colors.border, backgroundColor: colors.background }]} textAlign="left" /><Pressable accessibilityLabel="لصق رابط المستودع من الحافظة" onPress={pasteRepositoryUrl} style={({ pressed }) => [styles.clipboardButton, { borderColor: colors.border, backgroundColor: colors.background }, pressed && styles.pressed]}><MaterialCommunityIcons name="content-paste" size={19} color={colors.primary} /></Pressable></View>
+          {repositoryPreview.state === "ready" ? <View style={[styles.repositoryPreview, { backgroundColor: colors.subtle, borderColor: colors.border }]}><View style={styles.previewIdentity}><View style={[styles.providerIcon, { backgroundColor: repositoryPreview.preview.provider === "github" ? "#24292F" : repositoryPreview.preview.provider === "gitlab" ? "#FC6D26" : "#0052CC" }]}><MaterialCommunityIcons name={repositoryPreview.preview.iconName} size={20} color="#FFFFFF" /></View><View><Text style={[styles.previewName, { color: colors.foreground }]}>{repositoryPreview.preview.repositoryName}</Text><Text style={[styles.previewMeta, { color: colors.muted }]}>{repositoryPreview.preview.namespace} · {repositoryPreview.preview.platformLabel}</Text></View></View><Text style={[styles.previewStatus, { color: colors.success }]}>تم التعرف</Text></View> : null}
+          {repositoryPreview.state === "invalid" ? <Text style={[styles.previewError, { color: colors.warning }]}>{repositoryPreview.message}</Text> : null}
+          {repositoryPreview.state === "ready" ? <Pressable disabled={busy} onPress={confirmRepositoryCheck} style={({ pressed }) => [styles.checkButton, { borderColor: colors.border }, (pressed || busy) && styles.pressed]}><MaterialCommunityIcons name="shield-check-outline" size={18} color={colors.primary} /><Text style={[styles.checkText, { color: colors.primary }]}>{repositoryCheckMutation.isPending ? "جارٍ فحص الرابط…" : "فحص وجود المستودع (بعد موافقة)"}</Text></Pressable> : null}
+          {repositoryCheck ? <Text style={[styles.checkResult, { color: repositoryCheck.status === "found" ? colors.success : repositoryCheck.status === "not_found" ? colors.warning : colors.muted }]}>{repositoryCheck.message}</Text> : null}
+          <TextInput value={branch} onChangeText={setBranch} autoCapitalize="none" placeholder="main" placeholderTextColor={colors.muted} style={[styles.input, { color: colors.foreground, borderColor: colors.border, backgroundColor: colors.background }]} textAlign="left" />
+          <Pressable disabled={busy || repositoryPreview.state !== "ready"} onPress={() => repositoryMutation.mutate({ projectId, remoteUrl: repositoryPreview.state === "ready" ? repositoryPreview.preview.normalizedUrl : remoteUrl, defaultBranch: branch || "main" })} style={({ pressed }) => [styles.outlineButton, { borderColor: colors.primary }, (pressed || busy || repositoryPreview.state !== "ready") && styles.pressed]}><Text style={[styles.outlineText, { color: colors.primary }]}>{repositoryMutation.isPending ? "جارٍ التسجيل…" : "تسجيل المرجع فقط"}</Text></Pressable>
+        </Section>
+
+        <Section title="طلب بناء للمراجعة" colors={colors}>
+          <Text style={[styles.body, { color: colors.muted }]}>ينشئ طلباً وحالة موافقة فقط. يبقى التنفيذ محجوباً إلى أن يثبت Runner المحلي ويُعتمد المسار لاحقاً.</Text>
+          <Text style={[styles.fieldLabel, { color: colors.foreground }]}>قالب بيئة البناء</Text>
+          <View style={styles.templateRow}>{buildTemplatesQuery.data?.map((item) => <Pressable key={item.key} onPress={() => { setTemplateKey(item.key); if (!item.targets.includes(target)) setTarget(item.targets[0]); }} style={({ pressed }) => [styles.template, { borderColor: templateKey === item.key ? colors.primary : colors.border, backgroundColor: templateKey === item.key ? colors.subtle : "transparent" }, pressed && styles.pressed]}><Text style={[styles.targetText, { color: templateKey === item.key ? colors.primary : colors.muted }]}>{item.name}</Text></Pressable>)}</View>
+          {selectedTemplate ? <View style={[styles.templateDetail, { borderColor: colors.border, backgroundColor: colors.subtle }]}><Text style={[styles.recordTitle, { color: colors.foreground }]}>{selectedTemplate.description}</Text><Text style={[styles.recordText, { color: colors.muted }]}>الفحوص: {selectedTemplate.preflight.join(" ← ")}</Text><Text style={[styles.recordText, { color: colors.muted }]}>المخرجات: {selectedTemplate.artifacts.join("، ")}</Text></View> : null}
+          <View style={styles.targetRow}>{targets.map((item) => <Pressable key={item} onPress={() => setTarget(item)} style={({ pressed }) => [styles.target, { borderColor: target === item ? colors.primary : colors.border, backgroundColor: target === item ? colors.subtle : "transparent" }, pressed && styles.pressed]}><Text style={[styles.targetText, { color: target === item ? colors.primary : colors.muted }]}>{targetLabels[item]}</Text></Pressable>)}</View>
+          <TextInput value={title} onChangeText={setTitle} placeholder="عنوان طلب البناء" placeholderTextColor={colors.muted} style={[styles.input, { color: colors.foreground, borderColor: colors.border, backgroundColor: colors.background }]} textAlign="right" />
+          <TextInput value={summary} onChangeText={setSummary} multiline placeholder="النطاق ومعيار النجاح" placeholderTextColor={colors.muted} style={[styles.textarea, { color: colors.foreground, borderColor: colors.border, backgroundColor: colors.background }]} textAlign="right" />
+          {!latestScanCanProceed && latestImportId ? <Text style={[styles.gateWarning, { color: latestImport?.securityScanStatus === "blocked" ? colors.error : colors.warning }]}>لا يمكن إنشاء طلب بناء حتى تُراجع نتيجة فحص الأسرار للمصدر الحالي.</Text> : null}
+          <Pressable disabled={busy || !latestImportId || !latestScanCanProceed || !selectedTemplate?.targets.includes(target)} onPress={() => buildMutation.mutate({ projectId, importId: latestImportId, target, templateKey, title, summary })} style={({ pressed }) => [styles.primaryButton, { backgroundColor: colors.primary }, (pressed || busy || !latestImportId || !latestScanCanProceed || !selectedTemplate?.targets.includes(target)) && styles.pressed]}><Text style={styles.primaryText}>{buildMutation.isPending ? "جارٍ إنشاء الطلب…" : !latestImportId ? "أضف مصدراً أولاً" : !latestScanCanProceed ? "فحص الأمان يمنع الطلب" : "إنشاء طلب بناء للموافقة"}</Text></Pressable>
+        </Section>
+
+        {notice ? <Text style={[styles.error, { color: colors.error }]}>{notice}</Text> : null}
+        {overview.isLoading ? <ActivityIndicator color={colors.primary} /> : null}
+        <Section title="المصادر المحفوظة" colors={colors}>{overview.data?.imports.length ? overview.data.imports.map((item) => { const scan = parseSecurityScanSummary(item.securityScanSummary); const scanColor = item.securityScanStatus === "blocked" ? colors.error : item.securityScanStatus === "review_required" ? colors.warning : item.securityScanStatus === "clean" ? colors.success : colors.muted; return <View key={item.id} style={[styles.record, { borderColor: colors.border }]}><Text style={[styles.recordTitle, { color: colors.foreground }]}>{item.displayName}</Text><Text style={[styles.recordText, { color: colors.muted }]}>{item.source === "zip" ? "أرشيف محفوظ" : `مرجع ${item.provider ?? "Git"}`} · {item.status}</Text><Text style={[styles.recordText, { color: colors.muted }]}>{item.summary}</Text>{item.inspectionSummary ? <Text style={[styles.inspectionText, { color: colors.primary }]}>{item.inspectionSummary}</Text> : null}{item.source === "zip" ? <View style={[styles.securityCard, { borderColor: scanColor, backgroundColor: colors.subtle }]}><Text style={[styles.securityTitle, { color: scanColor }]}>فحص الأسرار: {item.securityScanStatus === "clean" ? "سليم" : item.securityScanStatus === "blocked" ? "محجوب" : item.securityScanStatus === "review_required" ? "يتطلب مراجعة" : "قيد الانتظار"}</Text>{scan ? <><Text style={[styles.recordText, { color: colors.muted }]}>فُحص {scan.scannedFiles} ملفاً نصياً؛ تُرك {scan.skippedFiles} خارج الفحص. لا تُعرض قيم الأسرار.</Text><Text style={[styles.recordText, { color: colors.muted }]}>حرج: {scan.counts.critical} · عالٍ: {scan.counts.high} · ملفات حساسة: {scan.counts.medium}</Text>{scan.findings.slice(0, 4).map((finding, index) => <Text key={`${finding.filePath}-${index}`} style={[styles.recordText, { color: scanColor }]}>{finding.category} · {finding.filePath}{finding.line ? `:${finding.line}` : ""}</Text>)}{scan.warnings.map((warning, index) => <Text key={index} style={[styles.recordText, { color: colors.warning }]}>{warning}</Text>)}</> : <Text style={[styles.recordText, { color: colors.muted }]}>لم تتوفر نتيجة مفصلة لهذا المصدر.</Text>}<Pressable disabled={busy} onPress={() => scanMutation.mutate({ projectId, importId: item.id })} style={({ pressed }) => [styles.securityScanButton, { borderColor: scanColor }, (pressed || busy) && styles.pressed]}><Text style={[styles.checkText, { color: scanColor }]}>{scanMutation.isPending ? "جارٍ إعادة الفحص…" : "إعادة فحص الأرشيف"}</Text></Pressable></View> : null}</View>; }) : <Text style={[styles.body, { color: colors.muted }]}>لا يوجد مصدر مشروع محفوظ بعد.</Text>}</Section>
+        <Section title="طلبات البناء" colors={colors}>{overview.data?.buildRequests.length ? overview.data.buildRequests.map((item) => <View key={item.id} style={[styles.record, { borderColor: colors.border }]}><Text style={[styles.recordTitle, { color: colors.foreground }]}>{item.title}</Text><Text style={[styles.recordText, { color: colors.muted }]}>{item.target} · {item.templateKey ?? "قالب غير محدد"} · {item.status}</Text><Text style={[styles.recordText, { color: colors.muted }]}>{item.summary}</Text></View>) : <Text style={[styles.body, { color: colors.muted }]}>لا توجد طلبات بناء. الطلبات هنا تخطيطية فقط.</Text>}</Section>
+      </ScrollView>
+    </ScreenContainer>
+  );
+}
+
+function Section({ title, children, colors }: { title: string; children: React.ReactNode; colors: ReturnType<typeof useColors> }) {
+  return <View style={[styles.section, { backgroundColor: colors.surface, borderColor: colors.border }]}><Text style={[styles.sectionTitle, { color: colors.foreground }]}>{title}</Text>{children}</View>;
+}
+
+const styles = StyleSheet.create({
+  content: { gap: 14, paddingBottom: 100, paddingTop: 18 }, back: { alignSelf: "flex-end", borderRadius: 10, borderWidth: 1, paddingHorizontal: 12, paddingVertical: 8 }, backText: { fontSize: 12, fontWeight: "800" }, eyebrow: { fontSize: 13, fontWeight: "900", textAlign: "right" }, heading: { fontSize: 29, fontWeight: "900", textAlign: "right" }, subheading: { fontSize: 14, lineHeight: 22, textAlign: "right" }, section: { borderRadius: 18, borderWidth: 1, gap: 12, padding: 15 }, sectionTitle: { fontSize: 16, fontWeight: "900", textAlign: "right" }, fieldLabel: { fontSize: 12, fontWeight: "800", textAlign: "right" }, body: { fontSize: 13, lineHeight: 20, textAlign: "right" }, input: { borderRadius: 11, borderWidth: 1, fontSize: 14, minHeight: 46, paddingHorizontal: 12 }, repositoryInputRow: { alignItems: "center", flexDirection: "row", gap: 8 }, repositoryInput: { flex: 1 }, clipboardButton: { alignItems: "center", borderRadius: 11, borderWidth: 1, height: 46, justifyContent: "center", width: 46 }, textarea: { borderRadius: 11, borderWidth: 1, fontSize: 14, minHeight: 84, padding: 12, textAlignVertical: "top" }, primaryButton: { alignItems: "center", borderRadius: 12, minHeight: 46, justifyContent: "center", paddingHorizontal: 14 }, primaryText: { color: "#fff", fontSize: 13, fontWeight: "900" }, outlineButton: { alignItems: "center", borderRadius: 12, borderWidth: 1, minHeight: 46, justifyContent: "center", paddingHorizontal: 14 }, outlineText: { fontSize: 13, fontWeight: "900" }, repositoryPreview: { alignItems: "center", borderRadius: 12, borderWidth: 1, flexDirection: "row-reverse", justifyContent: "space-between", padding: 11 }, previewIdentity: { alignItems: "center", flexDirection: "row-reverse", gap: 9 }, providerIcon: { alignItems: "center", borderRadius: 10, height: 36, justifyContent: "center", width: 36 }, previewName: { fontSize: 13, fontWeight: "900", textAlign: "right" }, previewMeta: { fontSize: 11, marginTop: 2, textAlign: "right" }, previewStatus: { fontSize: 11, fontWeight: "800" }, previewError: { fontSize: 12, fontWeight: "700", lineHeight: 18, textAlign: "right" }, checkButton: { alignItems: "center", borderRadius: 11, borderWidth: 1, flexDirection: "row-reverse", gap: 7, justifyContent: "center", minHeight: 42, paddingHorizontal: 12 }, checkText: { fontSize: 12, fontWeight: "800" }, checkResult: { fontSize: 12, fontWeight: "700", lineHeight: 19, textAlign: "right" }, templateRow: { flexDirection: "row-reverse", flexWrap: "wrap", gap: 8 }, template: { borderRadius: 9, borderWidth: 1, paddingHorizontal: 10, paddingVertical: 8 }, templateDetail: { borderRadius: 11, borderWidth: 1, gap: 3, padding: 10 }, targetRow: { flexDirection: "row-reverse", flexWrap: "wrap", gap: 8 }, target: { borderRadius: 9, borderWidth: 1, paddingHorizontal: 10, paddingVertical: 8 }, targetText: { fontSize: 12, fontWeight: "800" }, gateWarning: { fontSize: 12, fontWeight: "800", lineHeight: 19, textAlign: "right" }, record: { borderRadius: 12, borderWidth: 1, gap: 4, padding: 11 }, securityCard: { borderRadius: 10, borderWidth: 1, gap: 4, marginTop: 6, padding: 9 }, securityScanButton: { alignItems: "center", borderRadius: 9, borderWidth: 1, marginTop: 4, minHeight: 36, justifyContent: "center", paddingHorizontal: 10 }, securityTitle: { fontSize: 12, fontWeight: "900", textAlign: "right" }, recordTitle: { fontSize: 13, fontWeight: "900", textAlign: "right" }, recordText: { fontSize: 12, lineHeight: 18, textAlign: "right" }, inspectionText: { fontSize: 11, lineHeight: 18, textAlign: "right" }, error: { fontSize: 13, fontWeight: "700", lineHeight: 20, textAlign: "right" }, pressed: { opacity: 0.7, transform: [{ scale: 0.98 }] },
+});

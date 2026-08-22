@@ -3,12 +3,19 @@ import { and, desc, eq, inArray, lt, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/mysql2";
 import {
   agentPromptAssignments,
+  agentExecutions,
   agentModelRuns,
   agents,
   approvals,
   artifacts,
   contextPackages,
   costEntries,
+  councilOpinions,
+  decisions,
+  engineConnections,
+  engineSessions,
+  evidenceClaims,
+  evidenceSources,
   executionCommands,
   executionEvents,
   executionPlans,
@@ -18,8 +25,15 @@ import {
   multiFileBundleTemplates,
   modelCostReservations,
   modelUsage,
+  plannerTaskProposals,
+  projectBuildRequests,
   projectBriefs,
+  projectImports,
   projectReports,
+  researchCampaigns,
+  researchAutonomySettings,
+  researchQuestions,
+  researchSyntheses,
   projects,
   projectRepositoryLinks,
   repositoryScans,
@@ -52,6 +66,17 @@ import { broadcastRuntimeUpdate } from "./runtime-realtime";
 import { buildProjectReportDraft, estimateContextTokens, getCriticalPathTaskIds, normalizeContextSourceRefs, type ContextSourceRef, wouldCreateDependencyCycle } from "../lib/project-governance";
 import { modelRolePolicies, type AgentModelRole } from "../lib/agent-model-policy";
 import { validatePullRequestDraft, type PullRequestDraft } from "../lib/git-pr-policy";
+import type { PlannerInterpretation } from "../lib/planner-output-interpreter";
+import { buildPlannerTaskProposals, parsePlannerProposalCriteria } from "../lib/planner-task-proposals";
+import { assertEnginePlanningOnly, defaultEngineCapabilities, evidenceInstructionRisk, trustTierForSourceType, type EngineConnectionKind, type ResearchSourceType } from "../lib/research-fabric-policy";
+import { buildResearchSynthesis } from "../lib/research-synthesis";
+import { validateBuildRequest, validateRepositoryReference, validateZipArchive } from "../lib/project-intake-policy";
+import { verifyPublicRepository } from "../lib/repository-existence-check";
+import { getBuildTemplate } from "../lib/build-template-registry";
+import { inspectZipStructure, summarizeZipInspection } from "../lib/zip-structure-inspector";
+import { scanProjectArchiveSensitiveData, summarizeSensitiveDataScan } from "../lib/project-sensitive-data-scanner";
+import { buildPublicApisSearchUrl, parsePublicApisResponse, publicApisOperationFingerprint, PUBLIC_APIS_ORIGIN, type PublicApisSearchInput } from "../lib/public-apis-policy";
+import { storageGetSignedUrl, storagePut } from "./storage";
 
 let _db: ReturnType<typeof drizzle> | null = null;
 
@@ -1299,7 +1324,109 @@ export async function setWorkPlanStatusForProject(userId: number, input: { proje
   await db.update(workPlans).set({ status: input.status }).where(eq(workPlans.id, plan.id));
   const [updated] = await db.select().from(workPlans).where(eq(workPlans.id, plan.id)).limit(1);
   await recordExecutionEvent(userId, input.projectId, { actor: "مالك المشروع", type: "WORK_PLAN_STATUS_CHANGED", label: "تغيرت حالة خطة العمل", detail: `${plan.title} → ${input.status}` });
+  if (input.status === "approved") {
+    await createPlannerTaskProposalsForApprovedPlan(userId, input.projectId, updated.id);
+  }
   return updated;
+}
+
+async function createPlannerTaskProposalsForApprovedPlan(userId: number, projectId: number, workPlanId: number) {
+  const { db } = await requireOwnedProject(userId, projectId);
+  const [execution] = await db.select().from(agentExecutions).where(and(
+    eq(agentExecutions.projectId, projectId),
+    eq(agentExecutions.workPlanId, workPlanId),
+    eq(agentExecutions.role, "planner"),
+    inArray(agentExecutions.status, ["awaiting_review", "completed"]),
+  )).orderBy(desc(agentExecutions.createdAt)).limit(1);
+  if (!execution) return [];
+  const existing = await db.select({ id: plannerTaskProposals.id }).from(plannerTaskProposals).where(eq(plannerTaskProposals.workPlanId, workPlanId)).limit(1);
+  if (existing.length) return listPlannerTaskProposalsForProject(userId, projectId, workPlanId);
+  const [plan] = await db.select().from(workPlans).where(and(eq(workPlans.id, workPlanId), eq(workPlans.projectId, projectId), eq(workPlans.status, "approved"))).limit(1);
+  if (!plan) return [];
+  const drafts = buildPlannerTaskProposals({ planTitle: plan.title, planSummary: plan.summary });
+  await db.insert(plannerTaskProposals).values(drafts.map((draft, index) => ({
+    projectId,
+    workPlanId,
+    executionId: execution.id,
+    position: index + 1,
+    title: draft.title,
+    description: draft.description,
+    stage: draft.stage,
+    priority: draft.priority,
+    acceptanceCriteriaJson: JSON.stringify(draft.acceptanceCriteria),
+    status: "draft" as const,
+  })));
+  await db.update(agentExecutions).set({ status: "completed" }).where(eq(agentExecutions.id, execution.id));
+  await recordExecutionEvent(userId, projectId, {
+    taskId: execution.taskId ?? undefined,
+    actor: "Planner Task Interpreter",
+    type: "PLANNER_TASK_PROPOSALS_CREATED",
+    label: "حُولت خطة Planner المعتمدة إلى مهام مقترحة",
+    detail: `${drafts.length} مهام قابلة للتحرير؛ لا توجد مهام فعلية قبل تطبيق المالك الصريح.`,
+  });
+  broadcastRuntimeUpdate(userId, "request");
+  return listPlannerTaskProposalsForProject(userId, projectId, workPlanId);
+}
+
+export async function listPlannerTaskProposalsForProject(userId: number, projectId: number, workPlanId?: number) {
+  const { db } = await requireOwnedProject(userId, projectId);
+  const rows = await db.select().from(plannerTaskProposals).where(workPlanId
+    ? and(eq(plannerTaskProposals.projectId, projectId), eq(plannerTaskProposals.workPlanId, workPlanId))
+    : eq(plannerTaskProposals.projectId, projectId),
+  ).orderBy(plannerTaskProposals.workPlanId, plannerTaskProposals.position);
+  return rows.map((row) => ({ ...row, acceptanceCriteria: parsePlannerProposalCriteria(row.acceptanceCriteriaJson) }));
+}
+
+export async function updatePlannerTaskProposalForProject(userId: number, input: { projectId: number; proposalId: number; title?: string; description?: string; stage?: string; priority?: "low" | "medium" | "high" | "critical"; acceptanceCriteria?: string[]; status?: "draft" | "discarded" }) {
+  const { db } = await requireOwnedProject(userId, input.projectId);
+  const [proposal] = await db.select().from(plannerTaskProposals).where(and(eq(plannerTaskProposals.id, input.proposalId), eq(plannerTaskProposals.projectId, input.projectId))).limit(1);
+  if (!proposal) throw new Error("Planner task proposal not found");
+  if (proposal.status === "applied") throw new Error("Applied planner task proposals cannot be edited");
+  const values: Record<string, unknown> = {};
+  if (input.title !== undefined) values.title = input.title;
+  if (input.description !== undefined) values.description = input.description;
+  if (input.stage !== undefined) values.stage = input.stage;
+  if (input.priority !== undefined) values.priority = input.priority;
+  if (input.acceptanceCriteria !== undefined) values.acceptanceCriteriaJson = JSON.stringify(input.acceptanceCriteria);
+  if (input.status !== undefined) values.status = input.status;
+  if (!Object.keys(values).length) throw new Error("Planner task proposal update is empty");
+  await db.update(plannerTaskProposals).set(values).where(eq(plannerTaskProposals.id, proposal.id));
+  const [updated] = await db.select().from(plannerTaskProposals).where(eq(plannerTaskProposals.id, proposal.id)).limit(1);
+  await recordExecutionEvent(userId, input.projectId, { actor: "مالك المشروع", type: "PLANNER_TASK_PROPOSAL_UPDATED", label: "تم تحديث مهمة Planner مقترحة", detail: updated.title });
+  return { ...updated, acceptanceCriteria: parsePlannerProposalCriteria(updated.acceptanceCriteriaJson) };
+}
+
+export async function applyPlannerTaskProposalsForProject(userId: number, input: { projectId: number; workPlanId: number; proposalIds: number[]; confirm: true }) {
+  const { db } = await requireOwnedProject(userId, input.projectId);
+  const [plan] = await db.select().from(workPlans).where(and(eq(workPlans.id, input.workPlanId), eq(workPlans.projectId, input.projectId), eq(workPlans.status, "approved"))).limit(1);
+  if (!plan) throw new Error("Only an approved work plan can create project tasks");
+  const distinctIds = [...new Set(input.proposalIds)];
+  const proposals = await db.select().from(plannerTaskProposals).where(and(
+    eq(plannerTaskProposals.projectId, input.projectId),
+    eq(plannerTaskProposals.workPlanId, input.workPlanId),
+    inArray(plannerTaskProposals.id, distinctIds),
+  )).orderBy(plannerTaskProposals.position);
+  if (proposals.length !== distinctIds.length || proposals.some((proposal) => proposal.status !== "draft")) throw new Error("Only selected draft proposals from this approved plan can be applied");
+
+  const createdTasks = [];
+  for (const proposal of proposals) {
+    const task = await createTaskForProject(userId, {
+      projectId: input.projectId,
+      workPlanId: input.workPlanId,
+      title: proposal.title,
+      description: proposal.description,
+      stage: proposal.stage,
+      priority: proposal.priority,
+    });
+    for (const criterion of parsePlannerProposalCriteria(proposal.acceptanceCriteriaJson)) {
+      await createTaskAcceptanceCriterionForProject(userId, { projectId: input.projectId, taskId: task.id, criterion });
+    }
+    await db.update(plannerTaskProposals).set({ status: "applied", taskId: task.id }).where(eq(plannerTaskProposals.id, proposal.id));
+    createdTasks.push(task);
+  }
+  await recordExecutionEvent(userId, input.projectId, { actor: "مالك المشروع", type: "PLANNER_TASK_PROPOSALS_APPLIED", label: "تم إنشاء مهام من مقترحات Planner", detail: `${createdTasks.length} مهام أُنشئت بعد تأكيد صريح من المالك.` });
+  broadcastRuntimeUpdate(userId, "request");
+  return createdTasks;
 }
 
 export async function listTaskAcceptanceCriteriaForProject(userId: number, projectId: number) {
@@ -1461,6 +1588,104 @@ export async function listAgentModelRunsForProject(userId: number, projectId: nu
   return db.select().from(agentModelRuns).where(eq(agentModelRuns.projectId, projectId)).orderBy(desc(agentModelRuns.createdAt)).limit(limit);
 }
 
+export async function listAgentExecutionsForProject(userId: number, projectId: number, limit = 50) {
+  const { db } = await requireOwnedProject(userId, projectId);
+  return db.select().from(agentExecutions).where(eq(agentExecutions.projectId, projectId)).orderBy(desc(agentExecutions.createdAt)).limit(limit);
+}
+
+export async function createPlannerAgentExecutionForProject(userId: number, input: { projectId: number; taskId?: number; contextPackageId: number }) {
+  const { db } = await requireOwnedProject(userId, input.projectId);
+  await getAgentModelRunContextForProject(userId, input);
+  const requestKey = `planner:${input.contextPackageId}:${input.taskId ?? 0}`;
+  const [existing] = await db.select().from(agentExecutions).where(and(
+    eq(agentExecutions.projectId, input.projectId),
+    eq(agentExecutions.requestKey, requestKey),
+    inArray(agentExecutions.status, ["queued", "running", "awaiting_review"]),
+  )).orderBy(desc(agentExecutions.createdAt)).limit(1);
+  if (existing) return { execution: existing, reused: true as const };
+
+  const [result] = await db.insert(agentExecutions).values({
+    projectId: input.projectId,
+    taskId: input.taskId ?? null,
+    contextPackageId: input.contextPackageId,
+    role: "planner",
+    status: "queued",
+    requestKey,
+  });
+  const [execution] = await db.select().from(agentExecutions).where(eq(agentExecutions.id, Number(result.insertId))).limit(1);
+  await recordExecutionEvent(userId, input.projectId, {
+    taskId: input.taskId,
+    actor: "Planner Execution",
+    type: "PLANNER_EXECUTION_QUEUED",
+    label: "وُضع تنفيذ Planner للمراجعة",
+    detail: "سيحوّل المخرج المنظم إلى اقتراح خطة ودليل فقط؛ لن ينشئ مهاماً أو يطبق تغييرات.",
+  });
+  broadcastRuntimeUpdate(userId, "request");
+  return { execution, reused: false as const };
+}
+
+export async function markPlannerAgentExecutionRunningForProject(userId: number, input: { projectId: number; executionId: number }) {
+  const { db } = await requireOwnedProject(userId, input.projectId);
+  const [execution] = await db.select().from(agentExecutions).where(and(eq(agentExecutions.id, input.executionId), eq(agentExecutions.projectId, input.projectId))).limit(1);
+  if (!execution) throw new Error("Planner execution not found");
+  if (execution.status !== "queued") throw new Error("Planner execution is not available to start");
+  await db.update(agentExecutions).set({ status: "running", startedAt: new Date() }).where(eq(agentExecutions.id, execution.id));
+  return (await db.select().from(agentExecutions).where(eq(agentExecutions.id, execution.id)).limit(1))[0];
+}
+
+export async function interpretPlannerAgentExecutionForProject(userId: number, input: { projectId: number; executionId: number; modelRunId: number; interpretation: PlannerInterpretation }) {
+  const { db } = await requireOwnedProject(userId, input.projectId);
+  const [execution] = await db.select().from(agentExecutions).where(and(eq(agentExecutions.id, input.executionId), eq(agentExecutions.projectId, input.projectId))).limit(1);
+  if (!execution || execution.role !== "planner" || execution.status !== "running") throw new Error("Planner execution cannot be interpreted");
+  const [modelRun] = await db.select().from(agentModelRuns).where(and(eq(agentModelRuns.id, input.modelRunId), eq(agentModelRuns.projectId, input.projectId), eq(agentModelRuns.role, "planner"), eq(agentModelRuns.contextPackageId, execution.contextPackageId))).limit(1);
+  if (!modelRun || modelRun.status !== "completed") throw new Error("Planner model output is not available for interpretation");
+
+  const [planResult] = await db.insert(workPlans).values({
+    projectId: input.projectId,
+    title: input.interpretation.workPlan.title,
+    summary: input.interpretation.workPlan.summary,
+    status: "review",
+  });
+  const planId = Number(planResult.insertId);
+  const [artifactResult] = await db.insert(artifacts).values({
+    projectId: input.projectId,
+    taskId: execution.taskId,
+    name: input.interpretation.artifact.name,
+    kind: input.interpretation.artifact.kind,
+    storageKey: `agent-execution:${execution.id}:planner-output`,
+    summary: input.interpretation.artifact.summary,
+  });
+  const artifactId = Number(artifactResult.insertId);
+  await db.update(agentExecutions).set({
+    status: "awaiting_review",
+    modelRunId: modelRun.id,
+    workPlanId: planId,
+    artifactId,
+    outputSummary: input.interpretation.reviewNotice,
+    completedAt: new Date(),
+  }).where(eq(agentExecutions.id, execution.id));
+  await recordExecutionEvent(userId, input.projectId, {
+    taskId: execution.taskId ?? undefined,
+    actor: "Planner Output Interpreter",
+    type: "PLANNER_PROPOSAL_READY",
+    label: "اقتراح Planner جاهز للمراجعة",
+    detail: input.interpretation.reviewNotice,
+  });
+  broadcastRuntimeUpdate(userId, "request");
+  return (await db.select().from(agentExecutions).where(eq(agentExecutions.id, execution.id)).limit(1))[0];
+}
+
+export async function failPlannerAgentExecutionForProject(userId: number, input: { projectId: number; executionId: number; errorSummary: string }) {
+  const { db } = await requireOwnedProject(userId, input.projectId);
+  const [execution] = await db.select().from(agentExecutions).where(and(eq(agentExecutions.id, input.executionId), eq(agentExecutions.projectId, input.projectId))).limit(1);
+  if (!execution || !["queued", "running"].includes(execution.status)) throw new Error("Planner execution cannot be failed");
+  const summary = input.errorSummary.slice(0, 1_000);
+  await db.update(agentExecutions).set({ status: "failed", errorSummary: summary, completedAt: new Date() }).where(eq(agentExecutions.id, execution.id));
+  await recordExecutionEvent(userId, input.projectId, { taskId: execution.taskId ?? undefined, actor: "Planner Execution", type: "PLANNER_EXECUTION_FAILED", label: "فشل تنفيذ Planner", detail: summary });
+  broadcastRuntimeUpdate(userId, "request");
+  return (await db.select().from(agentExecutions).where(eq(agentExecutions.id, execution.id)).limit(1))[0];
+}
+
 export async function getAgentModelRunContextForProject(userId: number, input: { projectId: number; contextPackageId: number; taskId?: number }) {
   const { db, project } = await requireOwnedProject(userId, input.projectId);
   const [contextPackage] = await db.select().from(contextPackages).where(and(eq(contextPackages.id, input.contextPackageId), eq(contextPackages.projectId, input.projectId))).limit(1);
@@ -1573,6 +1798,87 @@ export async function recordExecutionEvent(userId: number, projectId: number, in
     detail: input.detail,
   });
   return Number(result.insertId);
+}
+
+export async function listProjectIntakeForOwner(userId: number, projectId: number) {
+  const { db } = await requireOwnedProject(userId, projectId);
+  const [imports, buildRequests, repositoryLink] = await Promise.all([
+    db.select().from(projectImports).where(eq(projectImports.projectId, projectId)).orderBy(desc(projectImports.createdAt)).limit(30),
+    db.select().from(projectBuildRequests).where(eq(projectBuildRequests.projectId, projectId)).orderBy(desc(projectBuildRequests.createdAt)).limit(30),
+    db.select().from(projectRepositoryLinks).where(eq(projectRepositoryLinks.projectId, projectId)).limit(1),
+  ]);
+  return { imports, buildRequests, repositoryLink: repositoryLink[0] ?? null, policy: { execution: "blocked", clone: "blocked", push: "blocked", merge: "blocked", archiveExtraction: "blocked" } };
+}
+
+export async function importProjectZipForOwner(userId: number, input: { projectId: number; fileName: string; byteSize: number; bytes: Uint8Array }) {
+  const validated = validateZipArchive(input);
+  const { db } = await requireOwnedProject(userId, input.projectId);
+  const inspection = inspectZipStructure(input.bytes);
+  const inspectionSummary = summarizeZipInspection(inspection);
+  const securityScan = scanProjectArchiveSensitiveData(input.bytes);
+  const securityScanSummary = summarizeSensitiveDataScan(securityScan);
+  const stored = await storagePut(`project-imports/${userId}/${input.projectId}/${validated.safeName}`, input.bytes, "application/zip");
+  const summary = `أرشيف ZIP محفوظ للمراجعة فقط (${Math.ceil(validated.byteSize / 1024)}KB). ${inspectionSummary} فحص الأمان: ${securityScan.status === "clean" ? "سليم" : securityScan.status === "blocked" ? "محجوب" : "يتطلب مراجعة"}.`;
+  const [result] = await db.insert(projectImports).values({ projectId: input.projectId, ownerId: userId, source: "zip", status: "received", displayName: validated.safeName, storageKey: stored.key, byteSize: validated.byteSize, summary, inspectionSummary, securityScanStatus: securityScan.status, securityScanSummary });
+  await db.insert(artifacts).values({ projectId: input.projectId, name: validated.safeName, kind: "project_archive", storageKey: stored.key, summary });
+  await recordExecutionEvent(userId, input.projectId, { actor: "بوابة أمان المشروع", type: "PROJECT_ARCHIVE_SENSITIVE_DATA_SCAN", label: "اكتمل فحص أسرار الأرشيف", detail: `النتيجة ${securityScan.status}; الملفات المفحوصة ${securityScan.scannedFiles}; النتائج المنقحة ${securityScan.findings.length}. لم تحفظ قيم سرية.` });
+  await recordExecutionEvent(userId, input.projectId, { actor: "مالك المشروع", type: "PROJECT_ARCHIVE_RECEIVED", label: "تم حفظ أرشيف مشروع", detail: summary });
+  return (await db.select().from(projectImports).where(eq(projectImports.id, Number(result.insertId))).limit(1))[0];
+}
+
+export async function rescanProjectZipForOwner(userId: number, input: { projectId: number; importId: number }) {
+  const { db } = await requireOwnedProject(userId, input.projectId);
+  const [source] = await db.select().from(projectImports).where(and(eq(projectImports.id, input.importId), eq(projectImports.projectId, input.projectId), eq(projectImports.ownerId, userId))).limit(1);
+  if (!source || source.source !== "zip" || !source.storageKey || !source.byteSize) throw new Error("لا يتوفر أرشيف ZIP صالح لإعادة الفحص.");
+  const response = await fetch(await storageGetSignedUrl(source.storageKey), { redirect: "error" });
+  if (!response.ok) throw new Error("تعذر الوصول إلى الأرشيف المخزن لإعادة الفحص.");
+  const bytes = new Uint8Array(await response.arrayBuffer());
+  validateZipArchive({ fileName: source.displayName, byteSize: source.byteSize, bytes });
+  const scan = scanProjectArchiveSensitiveData(bytes);
+  const securityScanSummary = summarizeSensitiveDataScan(scan);
+  await db.update(projectImports).set({ securityScanStatus: scan.status, securityScanSummary }).where(eq(projectImports.id, source.id));
+  await recordExecutionEvent(userId, input.projectId, { actor: "بوابة أمان المشروع", type: "PROJECT_ARCHIVE_SENSITIVE_DATA_RESCAN", label: "أعيد فحص أسرار الأرشيف", detail: `النتيجة ${scan.status}; الملفات المفحوصة ${scan.scannedFiles}; النتائج المنقحة ${scan.findings.length}. لم تحفظ قيم سرية.` });
+  return (await db.select().from(projectImports).where(eq(projectImports.id, source.id)).limit(1))[0];
+}
+
+export async function registerProjectRepositoryForOwner(userId: number, input: { projectId: number; remoteUrl: string; repositoryName?: string; defaultBranch: string }) {
+  const repository = validateRepositoryReference(input);
+  const { db } = await requireOwnedProject(userId, input.projectId);
+  await db.insert(projectRepositoryLinks).values({ projectId: input.projectId, remoteUrl: repository.remoteUrl, repositoryName: repository.repositoryName, defaultBranch: repository.defaultBranch, status: "unlinked" }).onDuplicateKeyUpdate({ set: { remoteUrl: repository.remoteUrl, repositoryName: repository.repositoryName, defaultBranch: repository.defaultBranch, status: "unlinked" } });
+  const summary = `مرجع ${repository.provider} مسجل للمراجعة فقط؛ لم يُستنسخ المستودع ولم تُستخدم بيانات اعتماد.`;
+  const [result] = await db.insert(projectImports).values({ projectId: input.projectId, ownerId: userId, source: "repository", status: "registered", displayName: repository.repositoryName, remoteUrl: repository.remoteUrl, provider: repository.provider, summary });
+  await recordExecutionEvent(userId, input.projectId, { actor: "مالك المشروع", type: "REPOSITORY_REFERENCE_REGISTERED", label: "تم تسجيل مرجع مستودع", detail: summary });
+  return (await db.select().from(projectImports).where(eq(projectImports.id, Number(result.insertId))).limit(1))[0];
+}
+
+export async function verifyProjectRepositoryForOwner(userId: number, input: { projectId: number; remoteUrl: string; defaultBranch: string }) {
+  await requireOwnedProject(userId, input.projectId);
+  const result = await verifyPublicRepository(input);
+  await recordExecutionEvent(userId, input.projectId, {
+    actor: "مالك المشروع",
+    type: "REPOSITORY_PUBLIC_CHECK",
+    label: "فحص وجود مستودع عام",
+    detail: `فحص صريح لمستودع ${result.provider}: ${result.status}. ${result.message}`,
+  });
+  return result;
+}
+
+export async function createProjectBuildRequestForOwner(userId: number, input: { projectId: number; importId?: number; target: string; title: string; summary: string; templateKey: string }) {
+  const build = validateBuildRequest(input);
+  const template = getBuildTemplate(input.templateKey);
+  if (!template.targets.includes(build.target)) throw new Error("هدف البناء لا يتوافق مع القالب المختار.");
+  const { db } = await requireOwnedProject(userId, input.projectId);
+  if (input.importId) {
+    const [source] = await db.select({ id: projectImports.id, securityScanStatus: projectImports.securityScanStatus }).from(projectImports).where(and(eq(projectImports.id, input.importId), eq(projectImports.projectId, input.projectId))).limit(1);
+    if (!source) throw new Error("مصدر المشروع غير موجود ضمن هذا المشروع.");
+    if (source.securityScanStatus === "pending") throw new Error("لا يمكن طلب البناء قبل فحص أسرار وبيانات المصدر.");
+    if (source.securityScanStatus === "blocked") throw new Error("حُجب طلب البناء لأن فحص المصدر عثر على أسرار أو بيانات حساسة عالية الخطورة.");
+  }
+  const [approvalResult] = await db.insert(approvals).values({ projectId: input.projectId, requestedBy: "منصة استيراد المشروع", title: `اعتماد طلب بناء: ${build.title}`, detail: `قالب البناء: ${template.name}. طلب تخطيط لهدف ${build.target}. لا ينفذ هذا الإصدار أي بناء أو رفع؛ الاعتماد يسجل قراراً فقط. ${build.summary}`, impact: `يتطلب بيئة بناء محلية مقيدة بعد إثبات Runner. الفحوص المتوقعة: ${template.preflight.join("، ")}.`, level: "approval" });
+  const approvalId = Number(approvalResult.insertId);
+  const [result] = await db.insert(projectBuildRequests).values({ projectId: input.projectId, importId: input.importId ?? null, requestedByUserId: userId, target: build.target, templateKey: template.key, status: "awaiting_approval", title: build.title, summary: build.summary, approvalId });
+  await recordExecutionEvent(userId, input.projectId, { actor: "مالك المشروع", type: "BUILD_REQUEST_PLANNED", label: "تم تخطيط طلب بناء", detail: `القالب ${template.key} والهدف ${build.target} بانتظار اعتماد صريح؛ لا يوجد تنفيذ أو رفع.` });
+  return (await db.select().from(projectBuildRequests).where(eq(projectBuildRequests.id, Number(result.insertId))).limit(1))[0];
 }
 
 export async function listProjectApprovals(userId: number, projectId: number) {
@@ -1690,6 +1996,211 @@ export async function recordProjectCost(userId: number, input: { projectId: numb
     detail: `${input.model}: $${input.amount.toFixed(4)}`,
   });
   return (await db.select().from(costEntries).where(eq(costEntries.id, costId)).limit(1))[0];
+}
+
+async function requireOwnedResearchCampaign(userId: number, projectId: number, campaignId: number) {
+  const { db } = await requireOwnedProject(userId, projectId);
+  const [campaign] = await db.select().from(researchCampaigns).where(and(eq(researchCampaigns.id, campaignId), eq(researchCampaigns.projectId, projectId))).limit(1);
+  if (!campaign) throw new Error("Research campaign not found for this project");
+  return { db, campaign };
+}
+
+export async function listResearchCampaignsForProject(userId: number, projectId: number) {
+  const { db } = await requireOwnedProject(userId, projectId);
+  return db.select().from(researchCampaigns).where(eq(researchCampaigns.projectId, projectId)).orderBy(desc(researchCampaigns.updatedAt));
+}
+
+export async function createResearchCampaignForProject(userId: number, input: { projectId: number; title: string; command: string; maxSources: number; maxQuestions: number; maxRounds: number; decisionLevel: "auto" | "review" | "approval"; questions: { question: string; category: string; priority: number }[] }) {
+  const { db } = await requireOwnedProject(userId, input.projectId);
+  if (!input.questions.length || input.questions.length > input.maxQuestions) throw new Error("Research questions must fit within the campaign budget");
+  const [result] = await db.insert(researchCampaigns).values({
+    projectId: input.projectId,
+    title: input.title,
+    command: input.command,
+    status: "researching",
+    maxSources: input.maxSources,
+    maxQuestions: input.maxQuestions,
+    maxRounds: input.maxRounds,
+    decisionLevel: input.decisionLevel,
+  });
+  const campaignId = Number(result.insertId);
+  await db.insert(researchQuestions).values(input.questions.map((question) => ({ campaignId, question: question.question, category: question.category, priority: question.priority, status: "pending" as const })));
+  await recordExecutionEvent(userId, input.projectId, { actor: "Research Orchestrator", type: "RESEARCH_CAMPAIGN_CREATED", label: "أنشئت حملة بحث مقيدة", detail: `${input.questions.length} أسئلة؛ حد المصادر ${input.maxSources}، ولا توجد موصلات تنفيذ أو بحث خارجي تلقائي.` });
+  const autonomy = await getResearchAutonomySettingsForOwner(userId);
+  if (autonomy.publicApisEnabled) {
+    await runPublicApisAutonomousSearchForProject(userId, { projectId: input.projectId, campaignId, query: input.questions[0]?.question, category: "Development", auth: "No", https: "Yes" });
+  }
+  return getResearchCampaignDetailForProject(userId, input.projectId, campaignId);
+}
+
+export async function getResearchAutonomySettingsForOwner(userId: number) {
+  const db = await getDb();
+  if (!db) return { publicApisEnabled: false, operationKeyReady: Boolean(ENV.cookieSecret) };
+  const [settings] = await db.select().from(researchAutonomySettings).where(eq(researchAutonomySettings.ownerId, userId)).limit(1);
+  return { publicApisEnabled: settings?.publicApisEnabled ?? false, operationKeyReady: Boolean(ENV.cookieSecret), enabledAt: settings?.enabledAt ?? null, updatedAt: settings?.updatedAt ?? null };
+}
+
+export async function setResearchAutonomySettingsForOwner(userId: number, publicApisEnabled: boolean) {
+  const db = await getDb();
+  if (!db) throw new Error("قاعدة البيانات غير متاحة لحفظ إعداد البحث الذاتي.");
+  if (publicApisEnabled && !ENV.cookieSecret) throw new Error("لا يتوفر سر خادم لتفعيل مفتاح تشغيل البحث الذاتي.");
+  await db.insert(researchAutonomySettings).values({ ownerId: userId, publicApisEnabled, enabledAt: publicApisEnabled ? new Date() : null }).onDuplicateKeyUpdate({ set: { publicApisEnabled, enabledAt: publicApisEnabled ? new Date() : null } });
+  return getResearchAutonomySettingsForOwner(userId);
+}
+
+export async function runPublicApisAutonomousSearchForProject(userId: number, input: { projectId: number; campaignId: number; questionId?: number; query?: string; category?: string; auth?: "No" | "apiKey" | "OAuth"; https?: "Yes" | "No" }) {
+  const { db, campaign } = await requireOwnedResearchCampaign(userId, input.projectId, input.campaignId);
+  const settings = await getResearchAutonomySettingsForOwner(userId);
+  if (!settings.publicApisEnabled) throw new Error("البحث الذاتي من دليل Public APIs معطل؛ فعّله المالك أولاً.");
+  const [{ count }] = await db.select({ count: sql<number>`count(*)` }).from(evidenceSources).where(and(eq(evidenceSources.campaignId, campaign.id), sql`${evidenceSources.url} like ${`${PUBLIC_APIS_ORIGIN}%`}`));
+  if (Number(count) > 0) throw new Error("اكتمل استعلام Public APIs الذاتي المسموح لهذه الحملة؛ راجع نتائجه أو أنشئ حملة جديدة.");
+  if (input.questionId) {
+    const [question] = await db.select({ id: researchQuestions.id }).from(researchQuestions).where(and(eq(researchQuestions.id, input.questionId), eq(researchQuestions.campaignId, campaign.id))).limit(1);
+    if (!question) throw new Error("سؤال البحث لا ينتمي إلى الحملة المحددة.");
+  }
+  const search = buildPublicApisSearchUrl({ query: input.query, category: input.category, auth: input.auth ?? "No", https: input.https ?? "Yes", pageSize: 8 } satisfies PublicApisSearchInput);
+  const operationFingerprint = publicApisOperationFingerprint(ENV.cookieSecret, { ownerId: userId, projectId: input.projectId, campaignId: campaign.id });
+  const response = await fetch(search, { headers: { Accept: "application/json" }, redirect: "error", signal: AbortSignal.timeout(8_000) });
+  if (response.status === 429) throw new Error(`حدّت واجهة Public APIs الاستعلام؛ أعد المحاولة بعد ${response.headers.get("retry-after") ?? "فترة قصيرة"}.`);
+  if (!response.ok) throw new Error(`تعذر بحث دليل Public APIs (${response.status}).`);
+  const candidates = parsePublicApisResponse(await response.json());
+  const summary = candidates.length ? candidates.slice(0, 6).map((candidate) => `${candidate.name} (${candidate.category}) — ${candidate.auth} — ${candidate.documentationUrl}`).join("\n") : "لم يُرجع الدليل واجهات مطابقة للفلاتر المحددة.";
+  const contentHash = createHash("sha256").update(JSON.stringify(candidates)).digest("hex");
+  const [result] = await db.insert(evidenceSources).values({ projectId: input.projectId, campaignId: campaign.id, questionId: input.questionId ?? null, sourceType: "web", url: search.toString(), title: "دليل Public APIs — بحث ذاتي محكوم", author: "Public APIs", contentHash, trustTier: "untrusted", redactedSummary: summary, instructionRiskDetected: evidenceInstructionRisk(summary) });
+  const sourceId = Number(result.insertId);
+  if (candidates.length) {
+    await db.insert(evidenceClaims).values(candidates.slice(0, 4).map((candidate) => ({ campaignId: campaign.id, sourceId, claim: `واجهة محتملة: ${candidate.name}`, evidenceExcerpt: `${candidate.description || "لا يوجد وصف"} · مصادقة: ${candidate.auth} · HTTPS: ${String(candidate.https)} · ${candidate.documentationUrl}`, relevance: 55, reliability: "untrusted" as const, status: "active" as const })));
+  }
+  if (input.questionId) await db.update(researchQuestions).set({ status: "researched" }).where(eq(researchQuestions.id, input.questionId));
+  await recordExecutionEvent(userId, input.projectId, { actor: "Public APIs Autonomous Research", type: "PUBLIC_APIS_AUTONOMOUS_SEARCH", label: "اكتمل بحث ذاتي محكوم", detail: `بصمة تشغيل ${operationFingerprint}؛ ${candidates.length} واجهة؛ استعلام واحد فقط لهذه الحملة؛ لم يُستخدم أو يُعرض مفتاح API.` });
+  return getResearchCampaignDetailForProject(userId, input.projectId, campaign.id);
+}
+
+function assertSafeEvidenceUrl(url?: string) {
+  if (!url) return;
+  let parsed: URL;
+  try { parsed = new URL(url); } catch { throw new Error("Evidence URL must be a valid absolute HTTPS URL"); }
+  if (parsed.protocol !== "https:") throw new Error("Evidence URL must use HTTPS");
+  const host = parsed.hostname.toLowerCase();
+  if (host === "localhost" || host.endsWith(".local") || /^127\.|^10\.|^192\.168\.|^169\.254\.|^172\.(1[6-9]|2\d|3[0-1])\./.test(host)) throw new Error("Evidence URL cannot target private or local network addresses");
+}
+
+export async function addEvidenceSourceForProject(userId: number, input: { projectId: number; campaignId: number; questionId?: number; sourceType: ResearchSourceType; url?: string; title: string; author?: string; publishedLabel?: string; contentHash?: string; redactedSummary: string }) {
+  const { db, campaign } = await requireOwnedResearchCampaign(userId, input.projectId, input.campaignId);
+  assertSafeEvidenceUrl(input.url);
+  const [{ count }] = await db.select({ count: sql<number>`count(*)` }).from(evidenceSources).where(eq(evidenceSources.campaignId, campaign.id));
+  if (Number(count) >= campaign.maxSources) throw new Error("Research campaign source budget has been reached");
+  if (input.questionId) {
+    const [question] = await db.select({ id: researchQuestions.id }).from(researchQuestions).where(and(eq(researchQuestions.id, input.questionId), eq(researchQuestions.campaignId, campaign.id))).limit(1);
+    if (!question) throw new Error("Research question not found for this campaign");
+  }
+  const [result] = await db.insert(evidenceSources).values({
+    projectId: input.projectId,
+    campaignId: campaign.id,
+    questionId: input.questionId ?? null,
+    sourceType: input.sourceType,
+    url: input.url ?? null,
+    title: input.title,
+    author: input.author ?? null,
+    publishedLabel: input.publishedLabel ?? null,
+    contentHash: input.contentHash ?? null,
+    trustTier: trustTierForSourceType(input.sourceType),
+    redactedSummary: input.redactedSummary,
+    instructionRiskDetected: evidenceInstructionRisk(`${input.title}\n${input.redactedSummary}`),
+  });
+  const sourceId = Number(result.insertId);
+  await recordExecutionEvent(userId, input.projectId, { actor: "Evidence Gateway", type: "EVIDENCE_SOURCE_RECORDED", label: "سُجل مصدر بحث منقح", detail: `${input.sourceType} · ${input.title}` });
+  return (await db.select().from(evidenceSources).where(eq(evidenceSources.id, sourceId)).limit(1))[0];
+}
+
+export async function addEvidenceClaimForProject(userId: number, input: { projectId: number; campaignId: number; sourceId: number; claim: string; evidenceExcerpt: string; relevance: number; conflictGroup?: string; status?: "active" | "conflicted" | "rejected" }) {
+  const { db, campaign } = await requireOwnedResearchCampaign(userId, input.projectId, input.campaignId);
+  const [source] = await db.select().from(evidenceSources).where(and(eq(evidenceSources.id, input.sourceId), eq(evidenceSources.campaignId, campaign.id))).limit(1);
+  if (!source) throw new Error("Evidence source not found for this campaign");
+  const [result] = await db.insert(evidenceClaims).values({ campaignId: campaign.id, sourceId: source.id, claim: input.claim, evidenceExcerpt: input.evidenceExcerpt, relevance: input.relevance, reliability: source.trustTier, conflictGroup: input.conflictGroup ?? null, status: input.status ?? "active" });
+  const claimId = Number(result.insertId);
+  return (await db.select().from(evidenceClaims).where(eq(evidenceClaims.id, claimId)).limit(1))[0];
+}
+
+export async function synthesizeResearchCampaignForProject(userId: number, input: { projectId: number; campaignId: number }) {
+  const { db, campaign } = await requireOwnedResearchCampaign(userId, input.projectId, input.campaignId);
+  const [claims, questions] = await Promise.all([
+    db.select().from(evidenceClaims).where(eq(evidenceClaims.campaignId, campaign.id)),
+    db.select().from(researchQuestions).where(and(eq(researchQuestions.campaignId, campaign.id), eq(researchQuestions.status, "pending"))),
+  ]);
+  const synthesis = buildResearchSynthesis({ claims, unansweredQuestions: questions.map((question) => question.question) });
+  const existing = await db.select({ id: researchSyntheses.id }).from(researchSyntheses).where(eq(researchSyntheses.campaignId, campaign.id)).limit(1);
+  if (existing[0]) {
+    await db.update(researchSyntheses).set({ summary: synthesis.summary, consensus: synthesis.consensus, conflicts: synthesis.conflicts, unknowns: synthesis.unknowns, optionsJson: JSON.stringify(synthesis.options), status: "review" }).where(eq(researchSyntheses.id, existing[0].id));
+  } else {
+    await db.insert(researchSyntheses).values({ campaignId: campaign.id, summary: synthesis.summary, consensus: synthesis.consensus, conflicts: synthesis.conflicts, unknowns: synthesis.unknowns, optionsJson: JSON.stringify(synthesis.options), status: "review" });
+  }
+  await db.update(researchCampaigns).set({ status: "awaiting_decision" }).where(eq(researchCampaigns.id, campaign.id));
+  await recordExecutionEvent(userId, input.projectId, { actor: "Knowledge Synthesizer", type: "RESEARCH_SYNTHESIS_CREATED", label: "تجميع الأدلة بانتظار القرار", detail: synthesis.summary });
+  return getResearchCampaignDetailForProject(userId, input.projectId, campaign.id);
+}
+
+export async function createCouncilOpinionForProject(userId: number, input: { projectId: number; campaignId: number; role: "research" | "architecture" | "product" | "ux" | "security" | "database" | "mobile" | "devops" | "cost" | "qa"; proposal: string; evidenceClaimIds: number[]; risks: string; assumptions: string; confidence: "low" | "medium" | "high"; requestedDecision: "auto" | "review" | "approval" }) {
+  const { db, campaign } = await requireOwnedResearchCampaign(userId, input.projectId, input.campaignId);
+  if (input.evidenceClaimIds.length) {
+    const claims = await db.select({ id: evidenceClaims.id }).from(evidenceClaims).where(and(eq(evidenceClaims.campaignId, campaign.id), inArray(evidenceClaims.id, input.evidenceClaimIds)));
+    if (claims.length !== new Set(input.evidenceClaimIds).size) throw new Error("Council opinion includes a claim outside this campaign");
+  }
+  const existing = await db.select({ id: councilOpinions.id }).from(councilOpinions).where(and(eq(councilOpinions.campaignId, campaign.id), eq(councilOpinions.role, input.role))).limit(1);
+  const values = { proposal: input.proposal, evidenceClaimIdsJson: JSON.stringify(input.evidenceClaimIds), risks: input.risks, assumptions: input.assumptions, confidence: input.confidence, requestedDecision: input.requestedDecision };
+  if (existing[0]) await db.update(councilOpinions).set(values).where(eq(councilOpinions.id, existing[0].id));
+  else await db.insert(councilOpinions).values({ campaignId: campaign.id, role: input.role, ...values });
+  await recordExecutionEvent(userId, input.projectId, { actor: "Agent Council", type: "COUNCIL_OPINION_RECORDED", label: "سُجل رأي مجلس تشاور", detail: input.role });
+  return (await db.select().from(councilOpinions).where(and(eq(councilOpinions.campaignId, campaign.id), eq(councilOpinions.role, input.role))).limit(1))[0];
+}
+
+export async function decideResearchCampaignForProject(userId: number, input: { projectId: number; campaignId: number; title: string; rationale: string }) {
+  const { db, campaign } = await requireOwnedResearchCampaign(userId, input.projectId, input.campaignId);
+  if (campaign.status !== "awaiting_decision") throw new Error("Research campaign must be synthesized before recording a decision");
+  const code = `RESEARCH-${campaign.id}`;
+  const [existing] = await db.select().from(decisions).where(and(eq(decisions.projectId, input.projectId), eq(decisions.code, code))).limit(1);
+  const decision = existing ?? (await db.insert(decisions).values({ projectId: input.projectId, code, title: input.title, rationale: input.rationale, decidedBy: "مالك المشروع" }).then(async (result) => (await db.select().from(decisions).where(eq(decisions.id, Number(result[0].insertId))).limit(1))[0]));
+  await db.update(researchCampaigns).set({ status: "completed" }).where(eq(researchCampaigns.id, campaign.id));
+  await recordExecutionEvent(userId, input.projectId, { actor: "Decision Engine", type: "RESEARCH_DECISION_RECORDED", label: "سُجل قرار مالك لحملة البحث", detail: input.title });
+  return decision;
+}
+
+export async function listEngineConnectionsForOwner(userId: number) {
+  const db = await getDb();
+  if (!db) return [];
+  return db.select().from(engineConnections).where(eq(engineConnections.ownerId, userId)).orderBy(desc(engineConnections.updatedAt));
+}
+
+export async function createEngineConnectionForOwner(userId: number, input: { key: string; name: string; kind: EngineConnectionKind; configReference?: string }) {
+  const db = await getDb();
+  if (!db) throw new Error("Database unavailable");
+  const [result] = await db.insert(engineConnections).values({ ownerId: userId, key: input.key, name: input.name, kind: input.kind, status: "planning", trustTier: input.kind === "internal_planner" || input.kind === "local_runner" ? "project" : "untrusted", capabilitiesJson: JSON.stringify(defaultEngineCapabilities(input.kind)), configReference: input.configReference ?? null });
+  return (await db.select().from(engineConnections).where(eq(engineConnections.id, Number(result.insertId))).limit(1))[0];
+}
+
+export async function createEnginePlanningSessionForProject(userId: number, input: { projectId: number; campaignId?: number; engineConnectionId: number; scopeSummary: string; correlationId: string }) {
+  const { db } = await requireOwnedProject(userId, input.projectId);
+  const [engine] = await db.select().from(engineConnections).where(and(eq(engineConnections.id, input.engineConnectionId), eq(engineConnections.ownerId, userId))).limit(1);
+  if (!engine) throw new Error("Engine connection not found for this owner");
+  assertEnginePlanningOnly({ kind: engine.kind, status: engine.status, executionRequested: false });
+  if (input.campaignId) await requireOwnedResearchCampaign(userId, input.projectId, input.campaignId);
+  const [result] = await db.insert(engineSessions).values({ projectId: input.projectId, campaignId: input.campaignId ?? null, engineConnectionId: engine.id, status: engine.kind === "internal_planner" ? "planned" : "awaiting_approval", scopeSummary: input.scopeSummary, correlationId: input.correlationId });
+  await recordExecutionEvent(userId, input.projectId, { actor: "Engine Adapter Registry", type: "ENGINE_SESSION_PLANNED", label: "خُططت جلسة محرك بلا تشغيل", detail: `${engine.name} · ${engine.kind}` });
+  return (await db.select().from(engineSessions).where(eq(engineSessions.id, Number(result.insertId))).limit(1))[0];
+}
+
+export async function getResearchCampaignDetailForProject(userId: number, projectId: number, campaignId: number) {
+  const { db, campaign } = await requireOwnedResearchCampaign(userId, projectId, campaignId);
+  const [questions, sources, claims, syntheses, opinions, sessions] = await Promise.all([
+    db.select().from(researchQuestions).where(eq(researchQuestions.campaignId, campaign.id)).orderBy(researchQuestions.priority),
+    db.select().from(evidenceSources).where(eq(evidenceSources.campaignId, campaign.id)).orderBy(desc(evidenceSources.fetchedAt)),
+    db.select().from(evidenceClaims).where(eq(evidenceClaims.campaignId, campaign.id)).orderBy(desc(evidenceClaims.relevance)),
+    db.select().from(researchSyntheses).where(eq(researchSyntheses.campaignId, campaign.id)).limit(1),
+    db.select().from(councilOpinions).where(eq(councilOpinions.campaignId, campaign.id)).orderBy(councilOpinions.role),
+    db.select().from(engineSessions).where(and(eq(engineSessions.projectId, projectId), eq(engineSessions.campaignId, campaign.id))).orderBy(desc(engineSessions.createdAt)),
+  ]);
+  const [decision] = await db.select().from(decisions).where(and(eq(decisions.projectId, projectId), eq(decisions.code, `RESEARCH-${campaign.id}`))).limit(1);
+  return { campaign, questions, sources, claims, synthesis: syntheses[0] ?? null, opinions, sessions, decision: decision ?? null };
 }
 
 export type AuthenticatedUser = Pick<User, "id" | "name">;

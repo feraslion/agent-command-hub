@@ -1,0 +1,37 @@
+flowchart TB
+  Owner["المالك · تطبيق جوال عربي"] --> UI["واجهات الحوكمة وRuntime"]
+  UI --> API["tRPC · API محمي"]
+
+  subgraph Governed["الحوكمة المقيدة"]
+    API --> Context["حزمة سياق منقحة"]
+    API --> Approval["موافقات وسجل تدقيق"]
+    Context --> Roles["Planner · Coder · QA · Reviewer · Debugger"]
+    Roles --> Gateway["LLM خادم-فقط · JSON Schema · حجز تكلفة"]
+    Gateway --> Run["تشغيل نموذج منظم"]
+    Run --> Artifact["Artifact JSON منقح"]
+    Artifact --> Storage["تخزين مرفق مملوك"]
+    Run --> Alert["تنبيه المالك"]
+    Run --> Approval
+  end
+
+  API --> Health["صحة Runtime وملخص يدوي"]
+  Health --> Alert
+  API --> Research["Public APIs · بحث واحد محكوم"]
+  Research --> Evidence["أدلة غير موثوقة للمراجعة"]
+  Evidence --> Context
+
+  Approval --> Request["طلب تنفيذ معتمد فقط"]
+  Request --> Runner["Runner محلي · Docker مقيد"]
+  Runner --> Result["سجل مخرجات منقح"]
+  Result --> Artifact
+
+  Schedule["ملخص دوري"] -. معطل حتى النشر والاعتماد .-> Health
+  Connector["موصلات وManus API"] -. معطلة حتى اعتماد صريح .-> API
+  Persistent["تشغيل دائم"] -. مؤجل حتى إثبات Docker .-> Runner
+
+  classDef active fill:#1E3A5F,stroke:#4F8CFF,color:#FFFFFF;
+  classDef guarded fill:#3C3420,stroke:#E3B341,color:#FFFFFF;
+  classDef disabled fill:#332B3B,stroke:#A78BFA,color:#FFFFFF,stroke-dasharray: 5 5;
+  class UI,API,Context,Roles,Gateway,Run,Artifact,Storage,Health,Research,Evidence,Approval active;
+  class Request,Runner,Result,Alert guarded;
+  class Schedule,Connector,Persistent disabled;

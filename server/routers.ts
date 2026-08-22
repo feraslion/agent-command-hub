@@ -10,6 +10,8 @@ import { runGovernedAgentRole } from "./agent-model-service";
 import { runPlannerAgentExecution } from "./agent-execution-service";
 import { agentModelRoles } from "../lib/agent-model-policy";
 import { buildTemplates } from "../lib/build-template-registry";
+import { notifyOwner } from "./_core/notification";
+import { buildOwnerOperationalDigest } from "../lib/operational-owner-digest";
 
 const projectIdInput = z.object({ projectId: z.number().int().positive() });
 const taskStatus = z.enum(["pending", "queued", "running", "verifying", "completed", "failed", "debugging", "retrying", "cancelled"]);
@@ -253,6 +255,12 @@ export const appRouter = router({
   }),
   operationalHealth: router({
     get: protectedProcedure.query(({ ctx }) => db.getOwnerOperationalHealth(ctx.user.id)),
+    sendOwnerDigest: protectedProcedure.mutation(async ({ ctx }) => {
+      const snapshot = await db.getOwnerOperationalHealth(ctx.user.id);
+      const digest = buildOwnerOperationalDigest(snapshot);
+      const delivered = await notifyOwner({ title: digest.title, content: digest.content });
+      return { delivered, needsAttention: digest.needsAttention, digest };
+    }),
   }),
   approvals: router({
     list: protectedProcedure.input(projectIdInput).query(({ ctx, input }) => db.listProjectApprovals(ctx.user.id, input.projectId)),

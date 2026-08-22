@@ -1488,7 +1488,8 @@ export async function addTaskDependencyForProject(userId: number, input: { proje
 
 export async function listArtifactsForProject(userId: number, projectId: number) {
   const { db } = await requireOwnedProject(userId, projectId);
-  return db.select().from(artifacts).where(eq(artifacts.projectId, projectId)).orderBy(desc(artifacts.createdAt));
+  const rows = await db.select().from(artifacts).where(eq(artifacts.projectId, projectId)).orderBy(desc(artifacts.createdAt));
+  return rows.map((artifact) => ({ ...artifact, storageUrl: artifact.storageKey ? `/manus-storage/${artifact.storageKey}` : null }));
 }
 
 export async function registerArtifactForProject(userId: number, input: { projectId: number; taskId?: number; name: string; kind: string; reference: string; summary?: string }) {

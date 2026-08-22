@@ -1,6 +1,10 @@
 import * as db from "./db";
 import { getApprovedModelSelection, invokeStructuredAgent } from "./agent-model-gateway";
 import { redactAgentPromptText, summarizeAgentOutput, type AgentModelRole } from "../lib/agent-model-policy";
+import { buildAgentOutputArtifact } from "../lib/agent-output-artifact";
+import { buildAgentRunOwnerAlert } from "../lib/agent-run-alert";
+import { notifyOwner } from "./_core/notification";
+import { storagePut } from "./storage";
 
 type SourceReference = { label?: string };
 
@@ -40,19 +44,39 @@ export async function runGovernedAgentRole(userId: number, input: { projectId: n
         risks: context.brief.risks,
       } : undefined,
     });
+    const outputSummary = summarizeAgentOutput(input.role, result.output);
     const completed = await db.settleAgentModelRunForProject(userId, {
       projectId: input.projectId,
       runId: prepared.run.id,
       outputJson: JSON.stringify(result.output),
-      outputSummary: summarizeAgentOutput(input.role, result.output),
+      outputSummary,
       inputTokens: result.usage.prompt_tokens,
       outputTokens: result.usage.completion_tokens,
       durationMs: Date.now() - startedAt,
     });
-    return { run: completed, output: result.output, selection };
+    let artifact: Awaited<ReturnType<typeof db.registerArtifactForProject>> | null = null;
+    let artifactWarning: string | null = null;
+    try {
+      const document = buildAgentOutputArtifact({ projectId: input.projectId, runId: prepared.run.id, role: input.role, model: selection.model, output: result.output, summary: outputSummary });
+      const stored = await storagePut(`${userId}/${document.storagePath}`, document.content, "application/json");
+      artifact = await db.registerArtifactForProject(userId, { projectId: input.projectId, taskId: input.taskId, name: document.name, kind: document.kind, reference: stored.key, summary: document.summary });
+    } catch {
+      artifactWarning = "اكتمل تشغيل النموذج، لكن تعذر حفظ ملف الدليل المنقح؛ المخرج المختصر ما زال مسجلاً في السجل.";
+    }
+    try {
+      await notifyOwner(buildAgentRunOwnerAlert({ role: input.role, status: "completed", summary: outputSummary, artifactCreated: Boolean(artifact) }));
+    } catch {
+      // Owner alerts are advisory and must never change a settled model result.
+    }
+    return { run: completed, output: result.output, selection, artifact, artifactWarning };
   } catch (error) {
     const summary = redactAgentPromptText(error instanceof Error ? error.message : "Model gateway failed", 1_000);
     await db.failAgentModelRunForProject(userId, { projectId: input.projectId, runId: prepared.run.id, errorSummary: summary });
+    try {
+      await notifyOwner(buildAgentRunOwnerAlert({ role: input.role, status: "failed", summary }));
+    } catch {
+      // A delivery failure must not hide the original model error.
+    }
     throw error;
   }
 }

@@ -1,8 +1,10 @@
 export const hostingProviderValues = ["render", "tidb_cloud", "railway", "koyeb", "manus_managed"] as const;
 export const hostingTargetKindValues = ["api", "database"] as const;
+export const hostingCheckStatusValues = ["not_tested", "reachable", "unreachable", "blocked"] as const;
 
 export type HostingProvider = (typeof hostingProviderValues)[number];
 export type HostingTargetKind = (typeof hostingTargetKindValues)[number];
+export type HostingCheckStatus = (typeof hostingCheckStatusValues)[number];
 
 export const hostingProviderCatalog: Record<HostingProvider, { label: string; summary: string; supportedKinds: HostingTargetKind[]; manualOnly: boolean }> = {
   render: { label: "Render", summary: "خدمة API مجانية للتجربة مع سكون تلقائي بعد عدم النشاط.", supportedKinds: ["api"], manualOnly: true },
@@ -36,4 +38,30 @@ export function validateHostingTarget(input: { provider: HostingProvider; kind: 
   const notes = input.notes?.trim() || null;
   if (notes && notes.length > 2_000) throw new Error("ملاحظات الخادم طويلة جداً.");
   return { label, endpoint, repositoryUrl, notes, status: endpoint ? "ready" as const : "draft" as const };
+}
+
+const providerEndpointDomains: Record<HostingProvider, string[]> = {
+  render: ["onrender.com"],
+  tidb_cloud: ["tidbcloud.com"],
+  railway: ["railway.app"],
+  koyeb: ["koyeb.app"],
+  manus_managed: ["manus.space"],
+};
+
+export function assertManualHostingCheckEndpoint(input: { provider: HostingProvider; endpoint: string | null }) {
+  if (!input.endpoint) throw new Error("أضف رابط HTTPS للخدمة قبل اختبار الاتصال.");
+  const parsed = new URL(input.endpoint);
+  const hostname = parsed.hostname.toLowerCase();
+  const allowed = providerEndpointDomains[input.provider].some((domain) => hostname === domain || hostname.endsWith(`.${domain}`));
+  if (parsed.protocol !== "https:" || parsed.username || parsed.password || parsed.port || !allowed) {
+    throw new Error("رابط الاختبار غير مسموح. استخدم نطاق HTTPS العام الذي يقدمه المزوّد المختار فقط.");
+  }
+  return parsed.toString();
+}
+
+export function formatHostingCheckResult(input: { status?: number; timedOut?: boolean }) {
+  if (input.timedOut) return { checkStatus: "unreachable" as const, statusCode: null, summary: "انتهت مهلة اختبار الاتصال بعد 5 ثوانٍ." };
+  if (typeof input.status === "number" && input.status >= 200 && input.status < 300) return { checkStatus: "reachable" as const, statusCode: input.status, summary: `استجاب الخادم بنجاح عبر HTTPS (HTTP ${input.status}).` };
+  if (typeof input.status === "number") return { checkStatus: "unreachable" as const, statusCode: input.status, summary: `استجاب العنوان، لكنه أعاد HTTP ${input.status} ولا يعد جاهزاً.` };
+  return { checkStatus: "unreachable" as const, statusCode: null, summary: "تعذر إكمال اتصال HTTPS بالخدمة." };
 }

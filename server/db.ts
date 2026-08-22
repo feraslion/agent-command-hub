@@ -80,6 +80,7 @@ import { scanProjectArchiveSensitiveData, summarizeSensitiveDataScan } from "../
 import { buildPublicApisSearchUrl, parsePublicApisResponse, publicApisOperationFingerprint, PUBLIC_APIS_ORIGIN, type PublicApisSearchInput } from "../lib/public-apis-policy";
 import { storageGetSignedUrl, storagePut } from "./storage";
 import { validateHostingTarget, type HostingProvider, type HostingTargetKind } from "../lib/server-hosting-policy";
+import { runManualHostingCheck } from "./hosting-connectivity-service";
 
 let _db: ReturnType<typeof drizzle> | null = null;
 
@@ -127,6 +128,24 @@ export async function removeHostingTargetForOwner(ownerId: number, targetId: num
   const db = await getDb();
   if (!db) throw new Error("قاعدة البيانات غير متاحة لحذف إعداد الخادم.");
   await db.delete(hostingTargets).where(and(eq(hostingTargets.id, targetId), eq(hostingTargets.ownerId, ownerId)));
+}
+
+export async function testHostingTargetForOwner(ownerId: number, targetId: number) {
+  const db = await getDb();
+  if (!db) throw new Error("قاعدة البيانات غير متاحة لاختبار الاتصال.");
+  const [target] = await db.select().from(hostingTargets).where(and(eq(hostingTargets.id, targetId), eq(hostingTargets.ownerId, ownerId))).limit(1);
+  if (!target) throw new Error("الخادم غير موجود أو غير مملوك للحساب.");
+  if (target.lastCheckedAt && Date.now() - target.lastCheckedAt.getTime() < 10_000) throw new Error("انتظر بضع ثوانٍ قبل إعادة اختبار الخادم نفسه.");
+  let result: Awaited<ReturnType<typeof runManualHostingCheck>> | { checkStatus: "blocked"; statusCode: null; summary: string; durationMs: number };
+  try {
+    result = await runManualHostingCheck({ provider: target.provider, endpoint: target.endpoint });
+  } catch (error) {
+    const summary = error instanceof Error ? error.message.slice(0, 255) : "حُجب اختبار الاتصال وفق سياسة الأمان.";
+    result = { checkStatus: "blocked", statusCode: null, summary, durationMs: 0 };
+  }
+  const checkedAt = new Date();
+  await db.update(hostingTargets).set({ lastCheckStatus: result.checkStatus, lastCheckCode: result.statusCode, lastCheckSummary: result.summary, lastCheckDurationMs: result.durationMs, lastCheckedAt: checkedAt }).where(and(eq(hostingTargets.id, targetId), eq(hostingTargets.ownerId, ownerId)));
+  return { ...result, checkedAt };
 }
 
 export async function upsertUser(user: InsertUser): Promise<void> {

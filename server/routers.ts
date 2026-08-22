@@ -51,6 +51,7 @@ export const appRouter = router({
       repositoryUrl: z.string().trim().max(2048).optional(),
       notes: z.string().trim().max(2_000).optional(),
     })).mutation(({ ctx, input }) => db.createHostingTargetForOwner(ctx.user.id, input)),
+    test: protectedProcedure.input(z.object({ targetId: z.number().int().positive() })).mutation(({ ctx, input }) => db.testHostingTargetForOwner(ctx.user.id, input.targetId)),
     remove: protectedProcedure.input(z.object({ targetId: z.number().int().positive() })).mutation(({ ctx, input }) => db.removeHostingTargetForOwner(ctx.user.id, input.targetId)),
   }),
   projects: router({

@@ -62,6 +62,7 @@ export const chatMessageRoleValues = ["user", "assistant"] as const;
 export const hostingProviderValues = ["render", "tidb_cloud", "railway", "koyeb", "manus_managed"] as const;
 export const hostingTargetKindValues = ["api", "database"] as const;
 export const hostingTargetStatusValues = ["draft", "ready"] as const;
+export const hostingCheckStatusValues = ["not_tested", "reachable", "unreachable", "blocked"] as const;
 
 export const chatMessages = mysqlTable("chat_messages", {
   id: int("id").autoincrement().primaryKey(),
@@ -85,6 +86,11 @@ export const hostingTargets = mysqlTable("hosting_targets", {
   notes: text("notes"),
   status: mysqlEnum("status", hostingTargetStatusValues).default("draft").notNull(),
   manualOnly: boolean("manual_only").default(true).notNull(),
+  lastCheckStatus: mysqlEnum("last_check_status", hostingCheckStatusValues).default("not_tested").notNull(),
+  lastCheckCode: int("last_check_code"),
+  lastCheckSummary: varchar("last_check_summary", { length: 255 }),
+  lastCheckDurationMs: int("last_check_duration_ms"),
+  lastCheckedAt: timestamp("last_checked_at"),
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().onUpdateNow().notNull(),
 }, (table) => [

@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { useRouter } from "expo-router";
 import { ActivityIndicator, FlatList, Modal, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
 
 import { ScreenContainer } from "@/components/screen-container";
@@ -16,6 +17,8 @@ type TemplateOption = {
   documentPaths: Record<PromptTemplateLocale, string>;
 };
 type PromptAssignment = { agentKey: string; templateKey: PromptTemplateKey; templateLocale: PromptTemplateLocale; customInstructions: string };
+type CommandIntent = "plan" | "review" | "debug";
+type AgentCommandRecord = { id: number; agentKey: string; intent: CommandIntent; instruction: string; status: string; createdAt: Date | string };
 
 const fallbackTemplates: TemplateOption[] = [
   { key: "planner", title: "Planner", arabicTitle: "المخطط", description: "خطة، تبعيات، ومعايير قرار واضحة.", documentPaths: { ar: "docs/prompts/planner-system-prompt-ar.md", en: "docs/prompts/planner-system-prompt-en.md" } },
@@ -37,11 +40,25 @@ function templateLabel(template: PromptTemplateKey) {
 
 export default function AgentsScreen() {
   const { agents } = useAgentHub();
+  const router = useRouter();
   const [selectedAgent, setSelectedAgent] = useState<Agent | null>(null);
+  const [commandAgentKey, setCommandAgentKey] = useState(agents[0]?.id ?? "planner");
+  const [commandIntent, setCommandIntent] = useState<CommandIntent>("plan");
+  const [commandInstruction, setCommandInstruction] = useState("");
+  const [commandNotice, setCommandNotice] = useState("");
   const utils = trpc.useUtils();
   const libraryQuery = trpc.agentPrompts.library.useQuery();
   const assignmentsQuery = trpc.agentPrompts.list.useQuery();
+  const commandsQuery = trpc.agentCommands.list.useQuery(undefined, { retry: false });
   const saveMutation = trpc.agentPrompts.save.useMutation({ onSuccess: () => utils.agentPrompts.list.invalidate() });
+  const commandMutation = trpc.agentCommands.create.useMutation({
+    onSuccess: async (command) => {
+      setCommandInstruction("");
+      setCommandNotice(`تم تسجيل طلب ${intentLabel(command.intent)} للوكيل. حالته الآن: بانتظار المراجعة؛ لم يُشغّل أي تنفيذ.`);
+      await utils.agentCommands.list.invalidate();
+    },
+    onError: (error) => setCommandNotice(error.data?.code === "UNAUTHORIZED" ? "سجّل الدخول أولاً لإرسال طلب إلى الوكيل." : error.message || "تعذر تسجيل طلب الوكيل."),
+  });
   const templates = (libraryQuery.data ?? fallbackTemplates) as TemplateOption[];
   const assignmentByAgent = useMemo(() => {
     const assignments = (assignmentsQuery.data ?? []) as PromptAssignment[];
@@ -61,7 +78,32 @@ export default function AgentsScreen() {
     />;
   }
 
-  return <ScreenContainer className="px-5" containerClassName="bg-[#F7F7FC]"><FlatList data={agents} keyExtractor={(item) => item.id} contentContainerStyle={styles.list} ListHeaderComponent={<View><Text style={styles.eyebrow}>عقود واضحة</Text><Text style={styles.heading}>الوكلاء</Text><Text style={styles.subheading}>لكل وكيل نطاق مسؤولية وحدود ومخرج وقالب System Prompt قابل للتعيين.</Text><View style={styles.legend}><Legend color="#18A56B" label="نشط" /><Legend color="#D88915" label="مراجعة" /><Legend color="#98A0B3" label="بانتظار المهمة" /></View></View>} renderItem={({ item }) => <AgentCard agent={item} template={assignmentByAgent.get(item.id)?.templateKey ?? defaultTemplateForAgent(item.id)} locale={assignmentByAgent.get(item.id)?.templateLocale ?? "ar"} onPress={() => setSelectedAgent(item)} />} ItemSeparatorComponent={() => <View style={styles.separator} />} /></ScreenContainer>;
+  const activeCommandAgent = agents.find((agent) => agent.id === commandAgentKey) ?? agents[0];
+  const commandRecords = (commandsQuery.data ?? []) as AgentCommandRecord[];
+
+  return <ScreenContainer className="px-5" containerClassName="bg-[#F7F7FC]"><FlatList data={agents} keyExtractor={(item) => item.id} contentContainerStyle={styles.list} ListHeaderComponent={<View><Text style={styles.eyebrow}>عقود واضحة</Text><Text style={styles.heading}>الوكلاء</Text><Text style={styles.subheading}>ابدأ من مركز الأوامر: اختر وكيلاً، اكتب المطلوب، ثم راقب حالة الطلب أو افتح المحادثة مباشرة.</Text><AgentCommandCenter agents={agents} selectedAgentKey={commandAgentKey} intent={commandIntent} instruction={commandInstruction} records={commandRecords} loading={commandsQuery.isLoading} submitting={commandMutation.isPending} notice={commandNotice} onAgentChange={setCommandAgentKey} onIntentChange={setCommandIntent} onInstructionChange={setCommandInstruction} onSubmit={() => { const instruction = commandInstruction.trim(); if (!instruction) return setCommandNotice("اكتب طلبك للوكيل أولاً."); commandMutation.mutate({ agentKey: commandAgentKey, intent: commandIntent, instruction }); }} onOpenChat={() => router.push({ pathname: "/chat", params: { agent: activeCommandAgent?.name ?? "الوكيل", intent: commandIntent } } as never)} /><View style={styles.legend}><Legend color="#18A56B" label="نشط" /><Legend color="#D88915" label="مراجعة" /><Legend color="#98A0B3" label="بانتظار المهمة" /></View><Text style={styles.directoryTitle}>دليل الوكلاء والعقود</Text></View>} renderItem={({ item }) => <AgentCard agent={item} template={assignmentByAgent.get(item.id)?.templateKey ?? defaultTemplateForAgent(item.id)} locale={assignmentByAgent.get(item.id)?.templateLocale ?? "ar"} onPress={() => setSelectedAgent(item)} />} ItemSeparatorComponent={() => <View style={styles.separator} />} /></ScreenContainer>;
+}
+
+function intentLabel(intent: CommandIntent) {
+  return intent === "plan" ? "خطة" : intent === "review" ? "مراجعة" : "تشخيص";
+}
+
+function AgentCommandCenter({ agents, selectedAgentKey, intent, instruction, records, loading, submitting, notice, onAgentChange, onIntentChange, onInstructionChange, onSubmit, onOpenChat }: {
+  agents: Agent[];
+  selectedAgentKey: string;
+  intent: CommandIntent;
+  instruction: string;
+  records: AgentCommandRecord[];
+  loading: boolean;
+  submitting: boolean;
+  notice: string;
+  onAgentChange: (agentKey: string) => void;
+  onIntentChange: (intent: CommandIntent) => void;
+  onInstructionChange: (instruction: string) => void;
+  onSubmit: () => void;
+  onOpenChat: () => void;
+}) {
+  return <View style={styles.commandCenter}><View style={styles.commandCenterHeader}><View><Text style={styles.commandCenterEyebrow}>ابدأ العمل هنا</Text><Text style={styles.commandCenterTitle}>مركز أوامر الوكلاء</Text></View><View style={styles.commandSafeBadge}><Text style={styles.commandSafeText}>تخطيط فقط</Text></View></View><Text style={styles.commandCenterCopy}>يسجل الطلب باسمك ليُراجع؛ لا يشغّل بناءً أو Docker أو Git أو نشرًا.</Text><Text style={styles.commandLabel}>1. اختر الوكيل</Text><View style={styles.agentChoices}>{agents.map((agent) => <Pressable key={agent.id} onPress={() => onAgentChange(agent.id)} style={({ pressed }) => [styles.agentChoice, selectedAgentKey === agent.id && styles.agentChoiceActive, pressed && styles.pressed]}><Text style={[styles.agentChoiceText, selectedAgentKey === agent.id && styles.agentChoiceTextActive]}>{agent.name}</Text></Pressable>)}</View><Text style={styles.commandLabel}>2. نوع الطلب</Text><View style={styles.commandKinds}>{(["plan", "review", "debug"] as CommandIntent[]).map((item) => <Pressable key={item} onPress={() => onIntentChange(item)} style={({ pressed }) => [styles.commandKind, intent === item && styles.commandKindActive, pressed && styles.pressed]}><Text style={[styles.commandKindText, intent === item && styles.commandKindTextActive]}>{intentLabel(item)}</Text></Pressable>)}</View><Text style={styles.commandLabel}>3. اكتب المطلوب</Text><TextInput value={instruction} onChangeText={onInstructionChange} multiline maxLength={2000} placeholder="مثال: حلل سبب بطء شاشة المهام واقترح خطة إصلاح واختبارات قبول." placeholderTextColor="#8A8FA1" textAlign="right" textAlignVertical="top" style={styles.commandInput} /><View style={styles.commandActions}><Pressable onPress={onOpenChat} style={({ pressed }) => [styles.chatShortcut, pressed && styles.pressed]}><Text style={styles.chatShortcutText}>فتح محادثة الوكيل</Text></Pressable><Pressable disabled={submitting || !instruction.trim()} onPress={onSubmit} style={({ pressed }) => [styles.commandSubmit, (submitting || !instruction.trim()) && styles.commandSubmitDisabled, pressed && !submitting && styles.pressed]}>{submitting ? <ActivityIndicator color="#FFFFFF" /> : <Text style={styles.commandSubmitText}>إرسال الطلب</Text>}</Pressable></View>{notice ? <Text style={styles.commandNotice}>{notice}</Text> : null}<View style={styles.commandHistory}><View style={styles.commandHistoryHeader}><Text style={styles.commandHistoryTitle}>آخر الطلبات</Text><Text style={styles.commandHistoryMeta}>{loading ? "جارٍ التحميل" : `${records.length} طلب`}</Text></View>{records.slice(0, 3).map((record) => <View key={record.id} style={styles.commandRecord}><View style={styles.commandRecordTop}><Text style={styles.commandRecordTitle}>{record.agentKey} · {intentLabel(record.intent)}</Text><Text style={styles.commandRecordStatus}>{record.status === "queued" ? "بانتظار المراجعة" : record.status}</Text></View><Text numberOfLines={2} style={styles.commandRecordCopy}>{record.instruction}</Text></View>)}{!loading && records.length === 0 ? <Text style={styles.commandHistoryEmpty}>لا توجد طلبات بعد. اكتب أول طلب أعلاه وسيظهر هنا.</Text> : null}</View></View>;
 }
 
 function Legend({ color, label }: { color: string; label: string }) {
@@ -69,7 +111,7 @@ function Legend({ color, label }: { color: string; label: string }) {
 }
 
 function AgentCard({ agent, template, locale, onPress }: { agent: Agent; template: PromptTemplateKey; locale: PromptTemplateLocale; onPress: () => void }) {
-  return <Pressable onPress={onPress} style={({ pressed }) => [styles.card, pressed && styles.pressed]}><View style={[styles.avatar, { backgroundColor: agent.color }]}><Text style={styles.avatarText}>{agent.name.slice(0, 1)}</Text></View><View style={styles.cardBody}><View style={styles.cardTop}><Text style={styles.agentName}>{agent.name}</Text><StatusPill label={agent.status} tone={statusTone(agent.status)} /></View><Text style={styles.role}>{agent.role}</Text><Text numberOfLines={2} style={styles.description}>{agent.responsibility}</Text><View style={styles.templateBadge}><Text style={styles.templateBadgeText}>قالب: {templateLabel(template)} · {locale === "ar" ? "عربي" : "EN"}</Text></View><Text style={styles.open}>إدارة القالب والعقد ←</Text></View></Pressable>;
+  return <Pressable onPress={onPress} style={({ pressed }) => [styles.card, pressed && styles.pressed]}><View style={[styles.avatar, { backgroundColor: agent.color }]}><Text style={styles.avatarText}>{agent.name.slice(0, 1)}</Text></View><View style={styles.cardBody}><View style={styles.cardTop}><Text style={styles.agentName}>{agent.name}</Text><StatusPill label={agent.status} tone={statusTone(agent.status)} /></View><Text style={styles.role}>{agent.role}</Text><Text numberOfLines={2} style={styles.description}>{agent.responsibility}</Text><View style={styles.templateBadge}><Text style={styles.templateBadgeText}>قالب: {templateLabel(template)} · {locale === "ar" ? "عربي" : "EN"}</Text></View><Text style={styles.open}>التفاصيل والعقد وإعدادات القالب ←</Text></View></Pressable>;
 }
 
 function AgentDetail({ agent, assignment, templates, loading, saving, saveError, onSave, onClose }: {
@@ -128,6 +170,43 @@ function PromptPreviewModal({ visible, loading, finalPrompt, error, onClose }: {
   return <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}><View style={styles.modalOverlay}><View style={styles.previewSheet}><View style={styles.previewSheetHeader}><Pressable onPress={onClose} style={({ pressed }) => [styles.closeButton, pressed && styles.pressed]}><Text style={styles.closeButtonText}>إغلاق</Text></Pressable><View><Text style={styles.previewTitle}>معاينة النص النهائي</Text><Text style={styles.previewSubtitle}>القالب الأساسي مع تعليماتك المخصصة</Text></View></View>{loading ? <View style={styles.previewLoading}><ActivityIndicator color="#5146D9" /><Text style={styles.previewLoadingText}>جارٍ تركيب المعاينة...</Text></View> : error ? <Text style={styles.previewError}>تعذر تحميل المعاينة: {error}</Text> : <ScrollView style={styles.previewScroll} contentContainerStyle={styles.previewScrollContent}><Text selectable style={styles.previewText}>{finalPrompt}</Text></ScrollView>}<Text style={styles.previewNotice}>هذه معاينة للرسالة المرسلة إلى الوكيل؛ الحفظ وحده لا يمنح صلاحيات تنفيذ إضافية.</Text></View></View></Modal>;
 }
 
-const styles = StyleSheet.create({
+const styles: Record<string, any> = StyleSheet.create({
+  commandCenter: { backgroundColor: "#FFFFFF", borderColor: "#DCD9FA", borderRadius: 22, borderWidth: 1, marginBottom: 18, padding: 15 },
+  commandCenterHeader: { alignItems: "flex-start", flexDirection: "row-reverse", justifyContent: "space-between" },
+  commandCenterEyebrow: { color: "#5146D9", fontSize: 11, fontWeight: "900", textAlign: "right" },
+  commandCenterTitle: { color: "#1B1A31", fontSize: 20, fontWeight: "900", marginTop: 3, textAlign: "right" },
+  commandSafeBadge: { backgroundColor: "#EAF8F0", borderRadius: 9, paddingHorizontal: 9, paddingVertical: 5 },
+  commandSafeText: { color: "#178457", fontSize: 10, fontWeight: "900" },
+  commandCenterCopy: { color: "#676A80", fontSize: 12, lineHeight: 19, marginTop: 7, textAlign: "right" },
+  commandLabel: { color: "#37364F", fontSize: 12, fontWeight: "900", marginTop: 14, textAlign: "right" },
+  agentChoices: { flexDirection: "row-reverse", flexWrap: "wrap", gap: 6, marginTop: 8 },
+  agentChoice: { backgroundColor: "#F8F8FD", borderColor: "#E1E3EB", borderRadius: 9, borderWidth: 1, paddingHorizontal: 9, paddingVertical: 7 },
+  agentChoiceActive: { backgroundColor: "#5146D9", borderColor: "#5146D9" },
+  agentChoiceText: { color: "#565A70", fontSize: 11, fontWeight: "800" },
+  agentChoiceTextActive: { color: "#FFFFFF" },
+  commandKinds: { flexDirection: "row-reverse", gap: 7, marginTop: 8 },
+  commandKind: { borderColor: "#D9DBE6", borderRadius: 9, borderWidth: 1, paddingHorizontal: 13, paddingVertical: 8 },
+  commandKindActive: { backgroundColor: "#EEEDFF", borderColor: "#5146D9" },
+  commandKindText: { color: "#646A7D", fontSize: 12, fontWeight: "900" },
+  commandKindTextActive: { color: "#4F46E5" },
+  commandInput: { backgroundColor: "#FBFBFE", borderColor: "#DDE0EA", borderRadius: 13, borderWidth: 1, color: "#25273A", fontSize: 13, lineHeight: 20, marginTop: 8, minHeight: 98, padding: 11 },
+  commandActions: { flexDirection: "row-reverse", gap: 8, marginTop: 10 },
+  chatShortcut: { alignItems: "center", backgroundColor: "#EEEDFF", borderRadius: 12, flex: 1, justifyContent: "center", minHeight: 45, paddingHorizontal: 8 },
+  chatShortcutText: { color: "#4F46E5", fontSize: 12, fontWeight: "900" },
+  commandSubmit: { alignItems: "center", backgroundColor: "#5146D9", borderRadius: 12, flex: 1, justifyContent: "center", minHeight: 45, paddingHorizontal: 8 },
+  commandSubmitDisabled: { backgroundColor: "#B9B6D7" },
+  commandSubmitText: { color: "#FFFFFF", fontSize: 12, fontWeight: "900" },
+  commandNotice: { backgroundColor: "#F7F6FF", borderRadius: 10, color: "#575474", fontSize: 11, lineHeight: 17, marginTop: 10, padding: 9, textAlign: "right" },
+  commandHistory: { borderTopColor: "#E6E7EF", borderTopWidth: 1, marginTop: 15, paddingTop: 12 },
+  commandHistoryHeader: { flexDirection: "row-reverse", justifyContent: "space-between" },
+  commandHistoryTitle: { color: "#34364E", fontSize: 13, fontWeight: "900" },
+  commandHistoryMeta: { color: "#858A9A", fontSize: 11, fontWeight: "800" },
+  commandRecord: { backgroundColor: "#FAFAFD", borderRadius: 11, marginTop: 8, padding: 10 },
+  commandRecordTop: { flexDirection: "row-reverse", justifyContent: "space-between" },
+  commandRecordTitle: { color: "#4F46E5", fontSize: 11, fontWeight: "900" },
+  commandRecordStatus: { color: "#A36B10", fontSize: 10, fontWeight: "800" },
+  commandRecordCopy: { color: "#606578", fontSize: 11, lineHeight: 17, marginTop: 4, textAlign: "right" },
+  commandHistoryEmpty: { color: "#7B8091", fontSize: 11, lineHeight: 17, marginTop: 8, textAlign: "right" },
+  directoryTitle: { color: "#34364E", fontSize: 15, fontWeight: "900", marginBottom: 9, textAlign: "right" },
   list: { paddingTop: 18, paddingBottom: 104 }, eyebrow: { color: "#4F46E5", fontSize: 13, fontWeight: "800", textAlign: "right" }, heading: { color: "#171725", fontSize: 32, fontWeight: "900", marginTop: 3, textAlign: "right" }, subheading: { color: "#6F7487", fontSize: 15, lineHeight: 22, marginBottom: 17, marginTop: 8, textAlign: "right" }, legend: { backgroundColor: "#FFFFFF", borderColor: "#EAECF2", borderRadius: 15, borderWidth: 1, flexDirection: "row-reverse", justifyContent: "space-around", marginBottom: 18, paddingVertical: 11 }, legendItem: { alignItems: "center", flexDirection: "row-reverse" }, dot: { borderRadius: 50, height: 8, marginLeft: 6, width: 8 }, legendText: { color: "#697084", fontSize: 11 }, card: { alignItems: "flex-start", backgroundColor: "#FFFFFF", borderColor: "#EAECF2", borderRadius: 20, borderWidth: 1, flexDirection: "row-reverse", padding: 14 }, avatar: { alignItems: "center", borderRadius: 16, height: 44, justifyContent: "center", marginLeft: 12, width: 44 }, avatarText: { color: "#FFFFFF", fontSize: 18, fontWeight: "900" }, cardBody: { flex: 1 }, cardTop: { alignItems: "flex-start", flexDirection: "row-reverse", justifyContent: "space-between" }, agentName: { color: "#202233", flex: 1, fontSize: 15, fontWeight: "800", textAlign: "right" }, role: { color: "#4F46E5", fontSize: 12, fontWeight: "700", marginTop: 4, textAlign: "right" }, description: { color: "#73798D", fontSize: 13, lineHeight: 19, marginTop: 8, textAlign: "right" }, templateBadge: { alignSelf: "flex-end", backgroundColor: "#F0EFFF", borderRadius: 8, marginTop: 9, paddingHorizontal: 8, paddingVertical: 4 }, templateBadgeText: { color: "#5A51C7", fontSize: 11, fontWeight: "800" }, open: { color: "#4F46E5", fontSize: 12, fontWeight: "800", marginTop: 10, textAlign: "right" }, separator: { height: 10 }, pressed: { opacity: 0.78, transform: [{ scale: 0.985 }] }, detailList: { paddingBottom: 104, paddingTop: 18 }, back: { alignSelf: "flex-end", marginBottom: 20, paddingVertical: 6 }, backText: { color: "#4F46E5", fontSize: 14, fontWeight: "800" }, detailAvatar: { alignItems: "center", borderRadius: 22, height: 68, justifyContent: "center", marginLeft: "auto", marginRight: "auto", width: 68 }, detailAvatarText: { color: "#FFFFFF", fontSize: 28, fontWeight: "900" }, detailName: { color: "#1A1C2A", fontSize: 24, fontWeight: "900", marginTop: 14, textAlign: "center" }, detailRole: { color: "#6D7285", fontSize: 14, marginBottom: 10, marginTop: 5, textAlign: "center" }, contractBanner: { backgroundColor: "#EEEDFF", borderRadius: 17, marginBottom: 18, marginTop: 18, padding: 15 }, contractTitle: { color: "#4F46E5", fontSize: 14, fontWeight: "900", textAlign: "right" }, contractCopy: { color: "#555174", fontSize: 13, lineHeight: 19, marginTop: 5, textAlign: "right" }, contractRow: { backgroundColor: "#FFFFFF", borderColor: "#EAECF2", borderRadius: 18, borderWidth: 1, padding: 15 }, contractLabel: { color: "#4F46E5", fontSize: 12, fontWeight: "900", textAlign: "right" }, contractValue: { color: "#3E4254", fontSize: 14, lineHeight: 21, marginTop: 7, textAlign: "right" }, promptPanel: { backgroundColor: "#FFFFFF", borderColor: "#E1E0FA", borderRadius: 19, borderWidth: 1, marginBottom: 18, padding: 15 }, promptHeader: { alignItems: "flex-start", flexDirection: "row-reverse", justifyContent: "space-between" }, promptTitle: { color: "#24233E", fontSize: 16, fontWeight: "900", textAlign: "right" }, promptCopy: { color: "#686C80", fontSize: 12, lineHeight: 18, marginTop: 4, textAlign: "right" }, promptStatus: { backgroundColor: "#EAF8F0", borderRadius: 8, marginLeft: 8, paddingHorizontal: 8, paddingVertical: 4 }, promptStatusText: { color: "#178457", fontSize: 10, fontWeight: "800" }, templateChoices: { flexDirection: "row-reverse", flexWrap: "wrap", gap: 7, marginTop: 15 }, templateChoice: { borderColor: "#E3E5EC", borderRadius: 12, borderWidth: 1, flexGrow: 1, flexBasis: "44%", paddingHorizontal: 6, paddingVertical: 10 }, templateChoiceActive: { backgroundColor: "#5146D9", borderColor: "#5146D9" }, templateChoiceTitle: { color: "#34364C", fontSize: 12, fontWeight: "900", textAlign: "center" }, templateChoiceTitleActive: { color: "#FFFFFF" }, templateChoiceCopy: { color: "#7B8092", fontSize: 10, marginTop: 3, textAlign: "center" }, templateChoiceCopyActive: { color: "#E8E6FF" }, localeRow: { alignItems: "center", flexDirection: "row-reverse", justifyContent: "space-between", marginTop: 14 }, localeLabel: { color: "#3E4254", fontSize: 12, fontWeight: "900" }, localeChoices: { flexDirection: "row-reverse", gap: 6 }, localeChoice: { borderColor: "#E1E3EB", borderRadius: 9, borderWidth: 1, paddingHorizontal: 11, paddingVertical: 7 }, localeChoiceActive: { backgroundColor: "#EEEDFF", borderColor: "#5146D9" }, localeText: { color: "#696D7F", fontSize: 11, fontWeight: "800" }, localeTextActive: { color: "#4F46E5" }, templateSummary: { backgroundColor: "#F8F8FD", borderRadius: 12, marginTop: 12, padding: 11 }, templateSummaryTitle: { color: "#4F46E5", fontSize: 12, fontWeight: "900", textAlign: "right" }, templateSummaryCopy: { color: "#585D70", fontSize: 12, lineHeight: 18, marginTop: 4, textAlign: "right" }, templatePath: { color: "#8A8FA1", fontSize: 10, marginTop: 7, textAlign: "left" }, instructionsLabel: { color: "#3E4254", fontSize: 12, fontWeight: "900", marginTop: 15, textAlign: "right" }, instructionsInput: { backgroundColor: "#FBFBFE", borderColor: "#E1E3EB", borderRadius: 12, borderWidth: 1, color: "#25273A", fontSize: 13, lineHeight: 20, marginTop: 7, minHeight: 104, padding: 11 }, instructionsHint: { color: "#777C91", fontSize: 11, lineHeight: 17, marginTop: 7, textAlign: "right" }, previewButton: { alignItems: "center", backgroundColor: "#EEEDFF", borderColor: "#5146D9", borderRadius: 12, borderWidth: 1, justifyContent: "center", marginTop: 14, minHeight: 43, paddingHorizontal: 14 }, previewButtonDisabled: { borderColor: "#C9C7E8", opacity: 0.65 }, previewButtonText: { color: "#4F46E5", fontSize: 13, fontWeight: "900" }, errorText: { color: "#C33A4D", fontSize: 11, lineHeight: 17, marginTop: 8, textAlign: "right" }, savePromptButton: { alignItems: "center", backgroundColor: "#5146D9", borderRadius: 12, justifyContent: "center", marginTop: 10, minHeight: 45, paddingHorizontal: 14 }, savePromptButtonDisabled: { backgroundColor: "#B9B6D7" }, savePromptButtonText: { color: "#FFFFFF", fontSize: 13, fontWeight: "900" }, modalOverlay: { backgroundColor: "rgba(20, 21, 33, 0.52)", flex: 1, justifyContent: "flex-end" }, previewSheet: { backgroundColor: "#FFFFFF", borderTopLeftRadius: 26, borderTopRightRadius: 26, maxHeight: "84%", minHeight: "54%", paddingBottom: 28, paddingHorizontal: 18, paddingTop: 16 }, previewSheetHeader: { alignItems: "flex-start", flexDirection: "row-reverse", justifyContent: "space-between" }, previewTitle: { color: "#22233A", fontSize: 17, fontWeight: "900", textAlign: "right" }, previewSubtitle: { color: "#777C90", fontSize: 11, marginTop: 4, textAlign: "right" }, closeButton: { backgroundColor: "#F0F0FA", borderRadius: 9, paddingHorizontal: 10, paddingVertical: 7 }, closeButtonText: { color: "#4F46E5", fontSize: 12, fontWeight: "900" }, previewLoading: { alignItems: "center", justifyContent: "center", minHeight: 220 }, previewLoadingText: { color: "#686C80", fontSize: 13, marginTop: 10 }, previewError: { color: "#C33A4D", fontSize: 13, lineHeight: 20, marginTop: 24, textAlign: "right" }, previewScroll: { backgroundColor: "#141821", borderRadius: 14, marginTop: 16 }, previewScrollContent: { padding: 14 }, previewText: { color: "#E9EBF4", fontFamily: "monospace", fontSize: 12, lineHeight: 19, textAlign: "left" }, previewNotice: { color: "#747A8F", fontSize: 11, lineHeight: 17, marginTop: 11, textAlign: "right" },
 });

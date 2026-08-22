@@ -9,6 +9,7 @@ import {
   approvals,
   artifacts,
   agentCommandRequests,
+  apiConnections,
   chatAttachments,
   chatMessages,
   contextPackages,
@@ -60,6 +61,7 @@ import {
   workspaceFiles,
   workspaces,
 } from "../drizzle/schema";
+import { getApiConnectionRequest, type ApiConnectionProvider } from "../lib/api-connection-policy";
 import { ENV } from "./_core/env";
 import { sandboxGateDetail, sandboxGateKinds, sandboxGateTitle } from "./sandbox-policy";
 import { assessSensitiveWorkspaceChange } from "../lib/sensitive-workspace-policy";
@@ -155,10 +157,55 @@ export async function createAgentCommandForOwner(ownerId: number, input: { agent
   return command;
 }
 
+export async function listAgentCommandsForOwner(ownerId: number) {
+  const db = await getDb();
+  if (!db) return [];
+  return db.select({
+    id: agentCommandRequests.id,
+    agentKey: agentCommandRequests.agentKey,
+    intent: agentCommandRequests.intent,
+    instruction: agentCommandRequests.instruction,
+    status: agentCommandRequests.status,
+    createdAt: agentCommandRequests.createdAt,
+  }).from(agentCommandRequests).where(eq(agentCommandRequests.ownerId, ownerId)).orderBy(desc(agentCommandRequests.createdAt)).limit(30);
+}
+
 export async function listHostingTargetsForOwner(ownerId: number) {
   const db = await getDb();
   if (!db) return [];
   return db.select().from(hostingTargets).where(eq(hostingTargets.ownerId, ownerId)).orderBy(desc(hostingTargets.updatedAt));
+}
+
+export async function listApiConnectionsForOwner(ownerId: number) {
+  const db = await getDb();
+  if (!db) return [];
+  return db.select({
+    id: apiConnections.id,
+    provider: apiConnections.provider,
+    authMode: apiConnections.authMode,
+    status: apiConnections.status,
+    lastRequestedAt: apiConnections.lastRequestedAt,
+    updatedAt: apiConnections.updatedAt,
+  }).from(apiConnections).where(eq(apiConnections.ownerId, ownerId)).orderBy(desc(apiConnections.updatedAt));
+}
+
+export async function requestApiConnectionForOwner(ownerId: number, provider: ApiConnectionProvider) {
+  const db = await getDb();
+  if (!db) throw new Error("قاعدة البيانات غير متاحة لحفظ طلب الربط.");
+  const request = getApiConnectionRequest(provider);
+  const requestedAt = new Date();
+  await db.insert(apiConnections).values({ ownerId, ...request, lastRequestedAt: requestedAt }).onDuplicateKeyUpdate({
+    set: { authMode: request.authMode, status: request.status, lastRequestedAt: requestedAt, updatedAt: requestedAt },
+  });
+  const [connection] = await db.select().from(apiConnections).where(and(eq(apiConnections.ownerId, ownerId), eq(apiConnections.provider, provider))).limit(1);
+  if (!connection) throw new Error("تعذر قراءة طلب الربط بعد حفظه.");
+  return connection;
+}
+
+export async function removeApiConnectionForOwner(ownerId: number, connectionId: number) {
+  const db = await getDb();
+  if (!db) throw new Error("قاعدة البيانات غير متاحة لإزالة إعداد الربط.");
+  await db.delete(apiConnections).where(and(eq(apiConnections.ownerId, ownerId), eq(apiConnections.id, connectionId)));
 }
 
 export async function createHostingTargetForOwner(ownerId: number, input: { provider: HostingProvider; kind: HostingTargetKind; label: string; endpoint?: string | null; repositoryUrl?: string | null; notes?: string | null }) {

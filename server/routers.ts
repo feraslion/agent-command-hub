@@ -16,6 +16,8 @@ import { runAgentChat } from "./agent-chat-service";
 import { sanitizeAgentChatText } from "../lib/agent-chat-policy";
 import { persistChatAssistantReply } from "./chat-history-service";
 import { hostingProviderValues, hostingTargetKindValues } from "../lib/server-hosting-policy";
+import { apiConnectionProviderValues } from "../lib/api-connection-policy";
+import { searchPublicApisForChat } from "./public-apis-chat-service";
 
 const projectIdInput = z.object({ projectId: z.number().int().positive() });
 const taskStatus = z.enum(["pending", "queued", "running", "verifying", "completed", "failed", "debugging", "retrying", "cancelled"]);
@@ -34,18 +36,30 @@ export const appRouter = router({
     list: protectedProcedure.query(({ ctx }) => db.listChatMessagesForOwner(ctx.user.id)),
     attachments: protectedProcedure.query(({ ctx }) => db.listChatAttachmentsForOwner(ctx.user.id)),
     attach: protectedProcedure.input(z.object({ fileName: z.string().trim().min(1).max(180), mimeType: z.string().trim().min(1).max(128), byteSize: z.number().int().positive().max(5 * 1024 * 1024), base64: z.string().min(4).max(7_000_000) })).mutation(({ ctx, input }) => db.addChatAttachmentForOwner({ ownerId: ctx.user.id, ...input })),
-    send: protectedProcedure.input(z.object({ message: z.string().trim().min(1).max(2_000), attachmentIds: z.array(z.number().int().positive()).max(5).optional() })).mutation(async ({ ctx, input }) => {
+    send: protectedProcedure.input(z.object({ message: z.string().trim().min(1).max(2_000), attachmentIds: z.array(z.number().int().positive()).max(5).optional(), usePublicApis: z.boolean().optional() })).mutation(async ({ ctx, input }) => {
       const safeMessage = sanitizeAgentChatText(input.message);
       if (!safeMessage) throw new Error("تعذر حفظ رسالة الدردشة بعد التنقيح.");
       const attachments = await db.getChatAttachmentContextForOwner(ctx.user.id, input.attachmentIds ?? []);
       const attachmentContext = attachments.length ? `\n\n[مرفقات مُنقحة]\n${attachments.map((item) => `- ${item.fileName} (${item.kind}): ${item.text ?? item.summary}`).join("\n")}` : "";
-      await db.addChatMessageForOwner({ ownerId: ctx.user.id, role: "user", content: `${safeMessage}${attachments.length ? `\n[أرفقت: ${attachments.map((item) => item.fileName).join("، ")}]` : ""}` });
-      const result = await runAgentChat(`${safeMessage}${attachmentContext}`);
+      let publicApis: Awaited<ReturnType<typeof searchPublicApisForChat>> | null = null;
+      let publicApisNotice = "";
+      if (input.usePublicApis) {
+        await db.requestApiConnectionForOwner(ctx.user.id, "public_apis");
+        try {
+          publicApis = await searchPublicApisForChat(safeMessage);
+          publicApisNotice = publicApis.notice;
+        } catch (error) {
+          publicApisNotice = error instanceof Error ? `${error.message} سيستمر الرد من دون نتائج خارجية.` : "تعذر بحث دليل Public APIs؛ سيستمر الرد من دون نتائج خارجية.";
+        }
+      }
+      await db.addChatMessageForOwner({ ownerId: ctx.user.id, role: "user", content: `${safeMessage}${attachments.length ? `\n[أرفقت: ${attachments.map((item) => item.fileName).join("، ")}]` : ""}${input.usePublicApis ? `\n[بحث دليل Public APIs: ${publicApis?.count ?? 0} نتيجة]` : ""}` });
+      const result = await runAgentChat(`${safeMessage}${attachmentContext}`, undefined, publicApis?.context ?? "");
       await persistChatAssistantReply({ ownerId: ctx.user.id, reply: result.reply, model: result.model }, db.addChatMessageForOwner);
-      return result;
+      return { ...result, publicApisNotice, publicApisCount: publicApis?.count ?? 0 };
     }),
   }),
   agentCommands: router({
+    list: protectedProcedure.query(({ ctx }) => db.listAgentCommandsForOwner(ctx.user.id)),
     create: protectedProcedure.input(z.object({ agentKey: z.string().trim().min(1).max(64), intent: z.enum(["plan", "review", "debug"]), instruction: z.string().trim().min(1).max(2_000) })).mutation(({ ctx, input }) => db.createAgentCommandForOwner(ctx.user.id, input)),
   }),
   hosting: router({
@@ -60,6 +74,11 @@ export const appRouter = router({
     })).mutation(({ ctx, input }) => db.createHostingTargetForOwner(ctx.user.id, input)),
     test: protectedProcedure.input(z.object({ targetId: z.number().int().positive() })).mutation(({ ctx, input }) => db.testHostingTargetForOwner(ctx.user.id, input.targetId)),
     remove: protectedProcedure.input(z.object({ targetId: z.number().int().positive() })).mutation(({ ctx, input }) => db.removeHostingTargetForOwner(ctx.user.id, input.targetId)),
+  }),
+  apiConnections: router({
+    list: protectedProcedure.query(({ ctx }) => db.listApiConnectionsForOwner(ctx.user.id)),
+    requestSetup: protectedProcedure.input(z.object({ provider: z.enum(apiConnectionProviderValues) })).mutation(({ ctx, input }) => db.requestApiConnectionForOwner(ctx.user.id, input.provider)),
+    remove: protectedProcedure.input(z.object({ connectionId: z.number().int().positive() })).mutation(({ ctx, input }) => db.removeApiConnectionForOwner(ctx.user.id, input.connectionId)),
   }),
   projects: router({
     list: protectedProcedure.query(({ ctx }) => db.listProjectsForOwner(ctx.user.id)),

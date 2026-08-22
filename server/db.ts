@@ -22,6 +22,7 @@ import {
   executionPlans,
   isolatedRuntimeBundles,
   isolatedRuntimeRequests,
+  hostingTargets,
   localRunners,
   multiFileBundleTemplates,
   modelCostReservations,
@@ -78,6 +79,7 @@ import { inspectZipStructure, summarizeZipInspection } from "../lib/zip-structur
 import { scanProjectArchiveSensitiveData, summarizeSensitiveDataScan } from "../lib/project-sensitive-data-scanner";
 import { buildPublicApisSearchUrl, parsePublicApisResponse, publicApisOperationFingerprint, PUBLIC_APIS_ORIGIN, type PublicApisSearchInput } from "../lib/public-apis-policy";
 import { storageGetSignedUrl, storagePut } from "./storage";
+import { validateHostingTarget, type HostingProvider, type HostingTargetKind } from "../lib/server-hosting-policy";
 
 let _db: ReturnType<typeof drizzle> | null = null;
 
@@ -103,6 +105,28 @@ export async function addChatMessageForOwner(input: { ownerId: number; role: "us
   const db = await getDb();
   if (!db) throw new Error("قاعدة البيانات غير متاحة لحفظ الدردشة.");
   await db.insert(chatMessages).values({ ownerId: input.ownerId, role: input.role, content: input.content, model: input.model ?? null });
+}
+
+export async function listHostingTargetsForOwner(ownerId: number) {
+  const db = await getDb();
+  if (!db) return [];
+  return db.select().from(hostingTargets).where(eq(hostingTargets.ownerId, ownerId)).orderBy(desc(hostingTargets.updatedAt));
+}
+
+export async function createHostingTargetForOwner(ownerId: number, input: { provider: HostingProvider; kind: HostingTargetKind; label: string; endpoint?: string | null; repositoryUrl?: string | null; notes?: string | null }) {
+  const db = await getDb();
+  if (!db) throw new Error("قاعدة البيانات غير متاحة لحفظ إعداد الخادم.");
+  const safeInput = validateHostingTarget(input);
+  const [result] = await db.insert(hostingTargets).values({ ownerId, provider: input.provider, kind: input.kind, ...safeInput, manualOnly: true });
+  const [target] = await db.select().from(hostingTargets).where(and(eq(hostingTargets.id, Number(result.insertId)), eq(hostingTargets.ownerId, ownerId))).limit(1);
+  if (!target) throw new Error("تعذر قراءة إعداد الخادم بعد حفظه.");
+  return target;
+}
+
+export async function removeHostingTargetForOwner(ownerId: number, targetId: number) {
+  const db = await getDb();
+  if (!db) throw new Error("قاعدة البيانات غير متاحة لحذف إعداد الخادم.");
+  await db.delete(hostingTargets).where(and(eq(hostingTargets.id, targetId), eq(hostingTargets.ownerId, ownerId)));
 }
 
 export async function upsertUser(user: InsertUser): Promise<void> {

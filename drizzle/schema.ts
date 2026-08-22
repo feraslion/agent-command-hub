@@ -59,6 +59,9 @@ export const projectImportStatusValues = ["received", "registered", "rejected"] 
 export const projectBuildRequestStatusValues = ["draft", "awaiting_approval", "approved", "rejected", "cancelled"] as const;
 export const projectBuildTargetValues = ["web", "android", "ios", "node", "docker", "custom"] as const;
 export const chatMessageRoleValues = ["user", "assistant"] as const;
+export const hostingProviderValues = ["render", "tidb_cloud", "railway", "koyeb", "manus_managed"] as const;
+export const hostingTargetKindValues = ["api", "database"] as const;
+export const hostingTargetStatusValues = ["draft", "ready"] as const;
 
 export const chatMessages = mysqlTable("chat_messages", {
   id: int("id").autoincrement().primaryKey(),
@@ -69,6 +72,23 @@ export const chatMessages = mysqlTable("chat_messages", {
   createdAt: timestamp("created_at").defaultNow().notNull(),
 }, (table) => [
   index("chat_messages_owner_created_idx").on(table.ownerId, table.createdAt),
+]);
+
+export const hostingTargets = mysqlTable("hosting_targets", {
+  id: int("id").autoincrement().primaryKey(),
+  ownerId: int("owner_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+  provider: mysqlEnum("provider", hostingProviderValues).notNull(),
+  kind: mysqlEnum("kind", hostingTargetKindValues).notNull(),
+  label: varchar("label", { length: 128 }).notNull(),
+  endpoint: varchar("endpoint", { length: 2048 }),
+  repositoryUrl: varchar("repository_url", { length: 2048 }),
+  notes: text("notes"),
+  status: mysqlEnum("status", hostingTargetStatusValues).default("draft").notNull(),
+  manualOnly: boolean("manual_only").default(true).notNull(),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().onUpdateNow().notNull(),
+}, (table) => [
+  index("hosting_targets_owner_updated_idx").on(table.ownerId, table.updatedAt),
 ]);
 
 export const projects = mysqlTable("projects", {

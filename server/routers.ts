@@ -15,6 +15,7 @@ import { buildOwnerOperationalDigest } from "../lib/operational-owner-digest";
 import { runAgentChat } from "./agent-chat-service";
 import { sanitizeAgentChatText } from "../lib/agent-chat-policy";
 import { persistChatAssistantReply } from "./chat-history-service";
+import { hostingProviderValues, hostingTargetKindValues } from "../lib/server-hosting-policy";
 
 const projectIdInput = z.object({ projectId: z.number().int().positive() });
 const taskStatus = z.enum(["pending", "queued", "running", "verifying", "completed", "failed", "debugging", "retrying", "cancelled"]);
@@ -39,6 +40,18 @@ export const appRouter = router({
       await persistChatAssistantReply({ ownerId: ctx.user.id, reply: result.reply, model: result.model }, db.addChatMessageForOwner);
       return result;
     }),
+  }),
+  hosting: router({
+    list: protectedProcedure.query(({ ctx }) => db.listHostingTargetsForOwner(ctx.user.id)),
+    create: protectedProcedure.input(z.object({
+      provider: z.enum(hostingProviderValues),
+      kind: z.enum(hostingTargetKindValues),
+      label: z.string().trim().min(2).max(128),
+      endpoint: z.string().trim().max(2048).optional(),
+      repositoryUrl: z.string().trim().max(2048).optional(),
+      notes: z.string().trim().max(2_000).optional(),
+    })).mutation(({ ctx, input }) => db.createHostingTargetForOwner(ctx.user.id, input)),
+    remove: protectedProcedure.input(z.object({ targetId: z.number().int().positive() })).mutation(({ ctx, input }) => db.removeHostingTargetForOwner(ctx.user.id, input.targetId)),
   }),
   projects: router({
     list: protectedProcedure.query(({ ctx }) => db.listProjectsForOwner(ctx.user.id)),
